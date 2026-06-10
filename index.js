@@ -41,7 +41,10 @@ app.use(
         "style-src": ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
         "font-src": ["'self'", "https://fonts.gstatic.com"],
         "img-src": ["'self'", "data:", "blob:"],
-        "media-src": ["'self'", "blob:", "mediastream:"],
+        // media-src: local blobs + mediastream for WebRTC, plus https: so the
+        // coach's co-watch direct film URLs (provider "other") can load as a
+        // <video src>. Scoped to https: rather than "*" to keep it tight.
+        "media-src": ["'self'", "blob:", "mediastream:", "https:"],
         // LiveKit signalling + ICE: wss/https to livekit.cloud, plus blob workers.
         "connect-src": [
           "'self'",
@@ -50,7 +53,8 @@ app.use(
           "https://cdn.jsdelivr.net",
         ],
         "worker-src": ["'self'", "blob:"],
-        "frame-src": ["'self'"],
+        // frame-src: co-watch YouTube/Drive embeds ONLY. No other origins.
+        "frame-src": ["'self'", "https://www.youtube.com", "https://drive.google.com"],
       },
     },
     // getUserMedia / WebRTC needs these relaxed in some browsers.

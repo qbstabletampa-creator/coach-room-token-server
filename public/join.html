@@ -136,6 +136,116 @@
   .ctrl.leave { background: var(--danger); color: #fff; }
   .ctrl.leave:hover { background: #c8452d; }
   .ctrl svg { width: 24px; height: 24px; }
+  /* unread dot on the Script control */
+  .ctrl { position: relative; }
+  .ctrl .unread {
+    position: absolute; top: 4px; right: 4px;
+    width: 11px; height: 11px; border-radius: 50%;
+    background: var(--gold); border: 2px solid var(--canvas);
+    display: none;
+  }
+  .ctrl.has-unread .unread { display: block; }
+
+  /* ---------- Co-watch film stage (sits over the camera in #remoteWrap) ---------- */
+  #cowatch {
+    position: absolute; inset: 0; display: none;
+    align-items: center; justify-content: center; background: #000;
+    z-index: 3;
+  }
+  #cowatchVideo { width: 100%; height: 100%; object-fit: contain; background: #000; }
+  #cowatchFrame { width: 100%; height: 100%; border: 0; background: #000; }
+  /* During co-watch the remote camera shrinks to a small PiP, lower-left. */
+  #remoteWrap.cowatch #remoteVideo {
+    position: absolute; left: 16px;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 96px);
+    width: 108px; height: 152px; object-fit: cover;
+    border-radius: var(--radius); z-index: 4;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.5);
+    border: 1px solid rgba(255,255,255,0.08);
+  }
+
+  /* ---------- Annotation (telestration) overlay ---------- */
+  #annoOverlay {
+    position: absolute; inset: 0; display: none;
+    pointer-events: none; z-index: 7;
+  }
+  #annoOverlay svg { width: 100%; height: 100%; display: block; }
+  #annoOverlay path {
+    fill: none; stroke: var(--gold); stroke-width: 4;
+    stroke-linecap: round; stroke-linejoin: round;
+    filter: drop-shadow(0 0 4px rgba(212,195,106,0.65));
+  }
+  /* Dim the live frame under the strokes while frozen. */
+  #freezeScrim {
+    position: absolute; inset: 0; display: none;
+    background: rgba(0,0,0,0.28); z-index: 6; pointer-events: none;
+  }
+  /* Top pills (freeze / co-watch banners) */
+  #topPill {
+    position: absolute; left: 50%; transform: translateX(-50%);
+    top: calc(env(safe-area-inset-top, 0px) + 16px);
+    display: none; align-items: center; gap: 8px; z-index: 9;
+    max-width: calc(100% - 120px);
+    background: rgba(0,0,0,0.55); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+    border: 1px solid rgba(212,195,106,0.35);
+    color: var(--text); font-size: 13px; font-weight: 600;
+    padding: 8px 14px; border-radius: 999px; line-height: 1.3;
+    text-align: center;
+  }
+  #topPill .pip-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--gold); box-shadow: 0 0 8px var(--gold); flex: 0 0 auto; }
+  #topPill .pip-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* ---------- Script panel ---------- */
+  #scriptPanel {
+    position: absolute;
+    left: 16px; right: 16px;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 92px);
+    max-width: 420px; margin: 0 auto;
+    background: rgba(22,22,26,0.96); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+    border: 1px solid rgba(255,255,255,0.1); border-radius: 12px;
+    box-shadow: 0 16px 48px rgba(0,0,0,0.55);
+    padding: 16px 16px 14px; z-index: 8; display: none;
+    max-height: 52vh; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  }
+  #scriptPanel.open { display: block; }
+  #scriptPanel .sp-head {
+    display: flex; align-items: center; justify-content: space-between;
+    margin: 0 0 12px;
+  }
+  #scriptPanel .sp-title { font-size: 15px; font-weight: 700; letter-spacing: .3px; }
+  #scriptPanel .sp-progress { font-size: 12px; color: var(--gold); font-weight: 600; }
+  #scriptPanel .sp-close {
+    background: none; border: 0; color: var(--muted); font-size: 20px;
+    line-height: 1; padding: 2px 6px; border-radius: 6px;
+  }
+  #scriptPanel .sp-close:hover { color: var(--text); background: rgba(255,255,255,0.08); }
+  #scriptList { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  #scriptList li {
+    display: flex; align-items: flex-start; gap: 10px;
+    font-size: 14px; line-height: 1.4; color: var(--text);
+  }
+  #scriptList li .box {
+    flex: 0 0 auto; width: 18px; height: 18px; margin-top: 1px;
+    border-radius: 5px; border: 1.5px solid #3A3A42;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #scriptList li.done .box { border-color: var(--gold); background: rgba(212,195,106,0.16); }
+  #scriptList li.done .box svg { width: 12px; height: 12px; stroke: var(--gold); }
+  #scriptList li.done .txt { color: var(--muted); }
+  #scriptList .empty { color: var(--muted); font-size: 13px; line-height: 1.5; padding: 6px 0; }
+
+  /* ---------- Moment toast ---------- */
+  #toast {
+    position: absolute; left: 50%; transform: translateX(-50%) translateY(8px);
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 92px);
+    background: rgba(22,22,26,0.92); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+    border: 1px solid rgba(212,195,106,0.4); color: var(--text);
+    font-size: 14px; font-weight: 600; padding: 11px 18px; border-radius: 999px;
+    box-shadow: 0 10px 32px rgba(0,0,0,0.5); z-index: 10;
+    opacity: 0; pointer-events: none; transition: opacity .2s ease, transform .2s ease;
+    max-width: calc(100% - 48px); text-align: center;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 </style>
 </head>
 <body>
@@ -157,6 +267,22 @@
   <div id="stage">
     <div id="remoteWrap">
       <video id="remoteVideo" autoplay playsinline></video>
+
+      <!-- Co-watch film stage: a direct <video> or an embed <iframe> goes here. -->
+      <div id="cowatch" aria-hidden="true"></div>
+
+      <!-- Freeze scrim dims the live frame under the strokes. -->
+      <div id="freezeScrim" aria-hidden="true"></div>
+
+      <!-- Telestration overlay (SVG strokes from the coach). -->
+      <div id="annoOverlay" aria-hidden="true">
+        <!-- viewBox 0..1 maps the normalized wire coords 1:1; preserveAspectRatio
+             none stretches it to the overlay's pixel size, so resize is free.
+             Paths use vector-effect non-scaling-stroke so the 4px line stays 4px
+             pixels regardless of the tiny coordinate space. -->
+        <svg id="annoSvg" viewBox="0 0 1 1" preserveAspectRatio="none"></svg>
+      </div>
+
       <div id="waiting">
         <div class="dot"></div>
         <h2>Waiting for the other coach…</h2>
@@ -164,7 +290,23 @@
       </div>
     </div>
 
+    <!-- Top status pill: freeze/drawing or co-watch banner. -->
+    <div id="topPill"><span class="pip-dot"></span><span class="pip-text" id="topPillText"></span></div>
+
     <div id="liveBadge"><span class="live-dot"></span>LIVE</div>
+
+    <!-- Practice-script checklist (read-only for the player). -->
+    <div id="scriptPanel" role="region" aria-label="Practice script">
+      <div class="sp-head">
+        <span class="sp-title">Practice script</span>
+        <span class="sp-progress" id="scriptProgress"></span>
+        <button class="sp-close" id="scriptCloseBtn" aria-label="Close script">&times;</button>
+      </div>
+      <ul id="scriptList"></ul>
+    </div>
+
+    <!-- Transient moment toast. -->
+    <div id="toast" role="status" aria-live="polite"></div>
 
     <div id="pip">
       <video id="localVideo" autoplay playsinline muted></video>
@@ -172,6 +314,7 @@
     </div>
 
     <div id="controls">
+      <button class="ctrl" id="scriptBtn" aria-label="Practice script" title="Script"><span class="unread" aria-hidden="true"></span></button>
       <button class="ctrl" id="micBtn" aria-label="Toggle microphone" title="Mute"></button>
       <button class="ctrl" id="camBtn" aria-label="Toggle camera" title="Camera"></button>
       <button class="ctrl leave" id="leaveBtn" aria-label="Leave session" title="Leave"></button>
@@ -220,6 +363,19 @@
   var micBtn = document.getElementById("micBtn");
   var camBtn = document.getElementById("camBtn");
   var leaveBtn = document.getElementById("leaveBtn");
+  var scriptBtn = document.getElementById("scriptBtn");
+  var remoteWrap = document.getElementById("remoteWrap");
+  var cowatch = document.getElementById("cowatch");
+  var freezeScrim = document.getElementById("freezeScrim");
+  var annoOverlay = document.getElementById("annoOverlay");
+  var annoSvg = document.getElementById("annoSvg");
+  var topPill = document.getElementById("topPill");
+  var topPillText = document.getElementById("topPillText");
+  var scriptPanel = document.getElementById("scriptPanel");
+  var scriptList = document.getElementById("scriptList");
+  var scriptProgress = document.getElementById("scriptProgress");
+  var scriptCloseBtn = document.getElementById("scriptCloseBtn");
+  var toastEl = document.getElementById("toast");
 
   // restore last name
   try {
@@ -232,11 +388,15 @@
     micOff: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"/><path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"/><line x1="12" y1="19" x2="12" y2="23"/></svg>',
     cam: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>',
     camOff: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 16v1a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2m5.66 0H14a2 2 0 0 1 2 2v3.34l1 1L23 7v10"/><line x1="1" y1="1" x2="23" y2="23"/></svg>',
-    leave: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-3.33-2.67m-2.67-3.34a19.79 19.79 0 0 1-3.07-8.63A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91"/><line x1="23" y1="1" x2="1" y2="23"/></svg>'
+    leave: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-3.33-2.67m-2.67-3.34a19.79 19.79 0 0 1-3.07-8.63A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91"/><line x1="23" y1="1" x2="1" y2="23"/></svg>',
+    clipboard: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2h6a1 1 0 0 1 1 1v1h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2V3a1 1 0 0 1 1-1z"/><path d="M9 4h6"/><path d="M8 11h8M8 15h5"/></svg>'
   };
+  // small inline check used in script rows
+  var CHECK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
   micBtn.innerHTML = ICONS.mic;
   camBtn.innerHTML = ICONS.cam;
   leaveBtn.innerHTML = ICONS.leave;
+  scriptBtn.insertAdjacentHTML("afterbegin", ICONS.clipboard);
 
   function showLobbyErr(msg) {
     lobbyErr.textContent = msg;
@@ -291,9 +451,16 @@
       lobby.style.display = "none";
       stage.style.display = "block";
 
+      // Reset any prior in-call UI state (rejoin safety).
+      resetCallState();
+
       // If someone is already in the room, show them.
       room.remoteParticipants.forEach(function (p) { bindRemote(p); });
       refreshRemoteState();
+
+      // Announce ourselves so the coach replays mode + script:sync + draw:sync.
+      myName = name;
+      sendHello(name);
     } catch (err) {
       console.error("[sideline] join failed:", err);
       var msg = err && err.message ? err.message : "Could not join the session.";
@@ -309,30 +476,75 @@
     }
   }
 
+  // Hidden container that holds detached remote audio <audio> elements so they
+  // keep playing and we can clean them up. Video always uses #remoteVideo.
+  var audioSinks = []; // { sid, el }
+
+  // Attach a single remote track. Idempotent: LiveKit's attach() reuses the
+  // element if already attached, so calling this from both TrackSubscribed and
+  // bindRemote is safe and order-independent.
+  function attachRemoteTrack(track) {
+    if (!track) return;
+    if (track.kind === Track.Kind.Video) {
+      track.attach(remoteVideo);
+      remoteVideo.playsInline = true;
+      remoteVideo.style.display = "block";
+    } else if (track.kind === Track.Kind.Audio) {
+      // Don't double-add the same audio sid.
+      var sid = track.sid || "";
+      for (var i = 0; i < audioSinks.length; i++) {
+        if (audioSinks[i].sid === sid && audioSinks[i].el && audioSinks[i].el.isConnected) return;
+      }
+      var el = track.attach(); // creates an <audio>, auto-plays
+      try { el.autoplay = true; el.setAttribute("playsinline", ""); } catch (e) {}
+      // Keep it in the DOM so iOS Safari doesn't pause/GC it.
+      el.style.display = "none";
+      document.body.appendChild(el);
+      audioSinks.push({ sid: sid, el: el });
+      // iOS sometimes needs a nudged play() after a user gesture (join click counts).
+      if (el.play) { var pr = el.play(); if (pr && pr.catch) pr.catch(function () {}); }
+    }
+  }
+
+  function detachRemoteTrack(track) {
+    if (!track) return;
+    if (track.kind === Track.Kind.Video) {
+      track.detach(remoteVideo);
+      remoteVideo.style.display = "none";
+    } else if (track.kind === Track.Kind.Audio) {
+      track.detach();
+      var sid = track.sid || "";
+      audioSinks = audioSinks.filter(function (s) {
+        if (s.sid === sid) { try { if (s.el && s.el.parentNode) s.el.parentNode.removeChild(s.el); } catch (e) {} return false; }
+        return true;
+      });
+    }
+  }
+
   function wireRoomEvents(r) {
     r.on(RoomEvent.TrackSubscribed, function (track, pub, participant) {
-      if (track.kind === Track.Kind.Video) {
-        track.attach(remoteVideo);
-        remoteVideo.style.display = "block";
-        remoteVideo.playsInline = true;
-      } else if (track.kind === Track.Kind.Audio) {
-        track.attach(); // auto-plays remote audio
-      }
+      attachRemoteTrack(track);
       refreshRemoteState();
     });
 
     r.on(RoomEvent.TrackUnsubscribed, function (track) {
-      track.detach();
-      if (track.kind === Track.Kind.Video) {
-        remoteVideo.style.display = "none";
-      }
+      detachRemoteTrack(track);
       refreshRemoteState();
     });
 
+    // Late joiners: when a participant connects after us, bind whatever they've
+    // already published and stay subscribed for anything that publishes later.
     r.on(RoomEvent.ParticipantConnected, function (p) { bindRemote(p); refreshRemoteState(); });
     r.on(RoomEvent.ParticipantDisconnected, function () {
       remoteVideo.style.display = "none";
       refreshRemoteState();
+    });
+
+    // Data channel: CoachTime protocol (topic "ct.v1", reliable).
+    r.on(RoomEvent.DataReceived, function (payload, participant, kind, topic) {
+      if (topic !== CALL_TOPIC) return;
+      var msg = decodeMessage(payload);
+      if (msg) handleCallMessage(msg);
     });
 
     r.on(RoomEvent.Disconnected, function () {
@@ -342,17 +554,371 @@
   }
 
   function bindRemote(participant) {
-    // Attach any already-subscribed tracks.
+    if (!participant) return;
+    // Attach any already-subscribed tracks (covers late local join + late
+    // remote publish where the track may already be live).
     participant.trackPublications.forEach(function (pub) {
-      if (pub.track) {
-        if (pub.track.kind === Track.Kind.Video) {
-          pub.track.attach(remoteVideo);
-          remoteVideo.style.display = "block";
-        } else if (pub.track.kind === Track.Kind.Audio) {
-          pub.track.attach();
-        }
-      }
+      if (pub.track) attachRemoteTrack(pub.track);
+      // Make sure we're subscribed so tracks published later still fire
+      // TrackSubscribed. autoSubscribe is on by default, but be explicit.
+      try { if (pub.setSubscribed) pub.setSubscribed(true); } catch (e) {}
     });
+  }
+
+  // ======================================================================
+  //  CoachTime in-call data protocol (topic "ct.v1"). Mirrors the locked
+  //  wire contract in coach-room-app/lib/call/protocol.ts. JSON over the
+  //  LiveKit data channel, reliable delivery. Player side is read-only.
+  // ======================================================================
+  var CALL_TOPIC = "ct.v1";
+  var encoder = new TextEncoder();
+  var decoder = new TextDecoder();
+  var myName = "Guest";
+
+  function decodeMessage(payload) {
+    try {
+      var parsed = JSON.parse(decoder.decode(payload));
+      if (parsed && parsed.v === 1 && typeof parsed.t === "string") return parsed;
+      return null;
+    } catch (e) { return null; }
+  }
+
+  function sendData(obj) {
+    if (!room || !room.localParticipant) return;
+    try {
+      var bytes = encoder.encode(JSON.stringify(obj));
+      room.localParticipant.publishData(bytes, { reliable: true, topic: CALL_TOPIC });
+    } catch (e) { /* non-fatal: data channel best-effort */ }
+  }
+
+  function sendHello(name) {
+    sendData({ v: 1, t: "hello", role: "player", name: String(name || "Guest").slice(0, 80) });
+  }
+
+  // ---- in-call protocol state ----
+  var callMode = "face";          // face | cowatch | freeze | share
+  var strokes = [];               // [{ id, d }] normalized 0..1 SVG paths
+  var scriptItems = null;         // null = never received; [] = empty list
+  var cowatchActive = false;
+
+  function resetCallState() {
+    callMode = "face";
+    strokes = [];
+    scriptItems = null;
+    cowatchActive = false;
+    renderStrokes();
+    renderScript();
+    endCowatch();
+    applyMode("face");
+    setUnread(false);
+  }
+
+  // ---- input validation: everything below is PEER input, treat as hostile ----
+  function isNum(n) { return typeof n === "number" && isFinite(n); }
+  function clampStr(v, max) { return typeof v === "string" ? v.slice(0, max || 200) : ""; }
+
+  // Accept only a safe SVG path "d": digits, dot, minus, space, and the path
+  // commands we expect from the coach (M/L plus their relative forms). Anything
+  // else (letters that could smuggle script, etc.) is rejected outright. The
+  // value is only ever set via setAttribute on an <svg:path>, never innerHTML.
+  var SAFE_PATH_RE = /^[MLmlHhVvZzCcSsQqTtAa0-9eE.,\-+\s]+$/;
+  function safePath(d) {
+    if (typeof d !== "string") return null;
+    var s = d.trim();
+    if (!s || s.length > 8000) return null;
+    if (!SAFE_PATH_RE.test(s)) return null;
+    return s;
+  }
+
+  function handleCallMessage(msg) {
+    switch (msg.t) {
+      case "mode":
+        applyMode(typeof msg.mode === "string" ? msg.mode : "face");
+        break;
+      case "script:sync":
+        applyScriptSync(Array.isArray(msg.items) ? msg.items : []);
+        break;
+      case "draw:stroke":
+        if (msg.stroke && typeof msg.stroke === "object") {
+          var d = safePath(msg.stroke.d);
+          if (d) { strokes.push({ id: clampStr(msg.stroke.id, 64), d: d }); renderStrokes(); }
+        }
+        break;
+      case "draw:undo":
+        strokes.pop(); renderStrokes();
+        break;
+      case "draw:clear":
+        strokes = []; renderStrokes(); clearFreeze();
+        break;
+      case "draw:sync":
+        strokes = [];
+        if (Array.isArray(msg.strokes)) {
+          msg.strokes.forEach(function (s) {
+            if (s && typeof s === "object") {
+              var d = safePath(s.d);
+              if (d) strokes.push({ id: clampStr(s.id, 64), d: d });
+            }
+          });
+        }
+        renderStrokes();
+        break;
+      case "cowatch:load":
+        loadCowatch(msg);
+        break;
+      case "cowatch:play":
+        cowatchSync("play", msg.pos);
+        break;
+      case "cowatch:pause":
+        cowatchSync("pause", msg.pos);
+        break;
+      case "cowatch:seek":
+        cowatchSync("seek", msg.pos);
+        break;
+      case "cowatch:end":
+        endCowatch();
+        applyMode("face");
+        break;
+      case "moment":
+        showMoment(msg.kind, msg.label);
+        break;
+      // "hello" from another peer is ignored on the player side.
+      default: break;
+    }
+  }
+
+  // ---------------- Mode awareness ----------------
+  function applyMode(mode) {
+    callMode = mode;
+    var frozen = (mode === "freeze");
+    // Freeze: dim the live frame + show the drawing pill, KEEP strokes.
+    if (frozen) {
+      freezeScrim.style.display = "block";
+      showTopPill("Coach froze the frame · drawing");
+      return;
+    }
+    // Any non-freeze mode: drop the telestration overlay + scrim. Co-watch
+    // owns its own pill/stage, so don't touch the pill while co-watching.
+    strokes = [];
+    renderStrokes();
+    freezeScrim.style.display = "none";
+    if (!cowatchActive) hideTopPill();
+  }
+
+  // Clear the telestration overlay + freeze visuals (not co-watch).
+  function clearFreeze() {
+    strokes = [];
+    renderStrokes();
+    freezeScrim.style.display = "none";
+    if (!cowatchActive) hideTopPill();
+  }
+
+  // ---------------- Annotations (telestration) ----------------
+  // Coords arrive normalized 0..1. The SVG uses a fixed 0..1000 viewBox with
+  // preserveAspectRatio="none", so it stretches to the overlay's pixel size
+  // automatically — no manual resize math needed, and resize "just works".
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  function renderStrokes() {
+    // Wipe + rebuild via DOM nodes only (never innerHTML with peer data).
+    while (annoSvg.firstChild) annoSvg.removeChild(annoSvg.firstChild);
+    var show = strokes.length > 0;
+    annoOverlay.style.display = show ? "block" : "none";
+    if (!show) return;
+    for (var i = 0; i < strokes.length; i++) {
+      var p = document.createElementNS(SVG_NS, "path");
+      // d is already normalized 0..1 and matches the 0..1 viewBox 1:1.
+      p.setAttribute("d", strokes[i].d);
+      // Keep the visible line at a true 4px regardless of the 0..1 coord space.
+      p.setAttribute("vector-effect", "non-scaling-stroke");
+      annoSvg.appendChild(p);
+    }
+  }
+
+  // ---------------- Practice script (read-only) ----------------
+  function applyScriptSync(items) {
+    var clean = [];
+    for (var i = 0; i < items.length && i < 200; i++) {
+      var it = items[i];
+      if (it && typeof it === "object") {
+        clean.push({
+          id: clampStr(it.id, 64),
+          text: clampStr(it.text, 300),
+          done: it.done === true
+        });
+      }
+    }
+    scriptItems = clean;
+    renderScript();
+    // If the panel is closed, flag unread so the player notices the change.
+    if (!scriptPanel.classList.contains("open")) setUnread(true);
+  }
+
+  function renderScript() {
+    while (scriptList.firstChild) scriptList.removeChild(scriptList.firstChild);
+    if (scriptItems === null) {
+      var none = document.createElement("li");
+      none.className = "empty";
+      none.textContent = "Coach hasn't shared a script yet.";
+      scriptList.appendChild(none);
+      scriptProgress.textContent = "";
+      return;
+    }
+    if (scriptItems.length === 0) {
+      var emptyLi = document.createElement("li");
+      emptyLi.className = "empty";
+      emptyLi.textContent = "The script is empty.";
+      scriptList.appendChild(emptyLi);
+      scriptProgress.textContent = "";
+      return;
+    }
+    var done = 0;
+    for (var i = 0; i < scriptItems.length; i++) {
+      var item = scriptItems[i];
+      if (item.done) done++;
+      var li = document.createElement("li");
+      if (item.done) li.className = "done";
+      var box = document.createElement("span");
+      box.className = "box";
+      if (item.done) box.innerHTML = CHECK_SVG; // static, trusted constant only
+      var txt = document.createElement("span");
+      txt.className = "txt";
+      txt.textContent = item.text; // peer text -> textContent, never HTML
+      li.appendChild(box);
+      li.appendChild(txt);
+      scriptList.appendChild(li);
+    }
+    scriptProgress.textContent = done + " of " + scriptItems.length;
+  }
+
+  function setUnread(on) { scriptBtn.classList.toggle("has-unread", !!on); }
+
+  function toggleScript() {
+    var open = scriptPanel.classList.toggle("open");
+    if (open) {
+      setUnread(false);
+      if (scriptItems === null) renderScript(); // show empty state
+    }
+  }
+  scriptBtn.addEventListener("click", toggleScript);
+  scriptCloseBtn.addEventListener("click", function () { scriptPanel.classList.remove("open"); });
+
+  // ---------------- Co-watch ----------------
+  var cowatchVideoEl = null; // direct <video> for provider "other"
+
+  function youtubeId(url) {
+    // Extract an 11-char video id from common YouTube URL forms.
+    var m = String(url).match(/(?:youtu\.be\/|v=|\/embed\/|\/shorts\/)([A-Za-z0-9_-]{11})/);
+    return m ? m[1] : null;
+  }
+  function driveFileId(url) {
+    var m = String(url).match(/\/file\/d\/([A-Za-z0-9_-]+)/) || String(url).match(/[?&]id=([A-Za-z0-9_-]+)/);
+    return m ? m[1] : null;
+  }
+
+  function clearCowatchStage() {
+    while (cowatch.firstChild) cowatch.removeChild(cowatch.firstChild);
+    cowatchVideoEl = null;
+  }
+
+  function loadCowatch(msg) {
+    var url = clampStr(msg.url, 2000);
+    var provider = msg.provider;
+    var title = clampStr(msg.title, 200);
+    clearCowatchStage();
+
+    if (provider === "other") {
+      // Direct film URL: must be https (CSP media-src https:). Reject otherwise.
+      if (!/^https:\/\//i.test(url)) { endCowatch(); return; }
+      var v = document.createElement("video");
+      v.src = url; // src attribute, not innerHTML
+      v.setAttribute("playsinline", "");
+      v.playsInline = true;
+      v.controls = false;
+      v.id = "cowatchVideo";
+      cowatch.appendChild(v);
+      cowatchVideoEl = v;
+    } else if (provider === "youtube") {
+      var yid = youtubeId(url);
+      if (!yid) { endCowatch(); return; }
+      var f = document.createElement("iframe");
+      f.id = "cowatchFrame";
+      // Only the id is interpolated, and it's been regex-validated to [A-Za-z0-9_-]{11}.
+      f.src = "https://www.youtube.com/embed/" + yid + "?playsinline=1&rel=0";
+      f.setAttribute("allow", "autoplay; encrypted-media; picture-in-picture");
+      f.setAttribute("allowfullscreen", "");
+      cowatch.appendChild(f);
+    } else if (provider === "drive") {
+      var did = driveFileId(url);
+      if (!did) { endCowatch(); return; }
+      var df = document.createElement("iframe");
+      df.id = "cowatchFrame";
+      df.src = "https://drive.google.com/file/d/" + did + "/preview";
+      df.setAttribute("allow", "autoplay");
+      df.setAttribute("allowfullscreen", "");
+      cowatch.appendChild(df);
+    } else {
+      endCowatch();
+      return;
+    }
+
+    cowatchActive = true;
+    cowatch.style.display = "flex";
+    remoteWrap.classList.add("cowatch"); // shrinks coach camera to PiP
+    // Clear any drawing overlay; co-watch is its own mode.
+    strokes = []; renderStrokes(); freezeScrim.style.display = "none";
+    showTopPill("Watching with coach" + (title ? " · " + title : ""));
+  }
+
+  function cowatchSync(action, pos) {
+    // Only provider "other" (direct <video>) supports playhead sync in v1.
+    if (!cowatchVideoEl) return;
+    var p = isNum(pos) ? pos : null;
+    try {
+      if (action === "seek") {
+        if (p !== null) cowatchVideoEl.currentTime = p;
+      } else if (action === "play") {
+        if (p !== null && Math.abs(cowatchVideoEl.currentTime - p) > 0.5) cowatchVideoEl.currentTime = p;
+        var pr = cowatchVideoEl.play(); if (pr && pr.catch) pr.catch(function () {});
+      } else if (action === "pause") {
+        if (p !== null && Math.abs(cowatchVideoEl.currentTime - p) > 0.5) cowatchVideoEl.currentTime = p;
+        cowatchVideoEl.pause();
+      }
+    } catch (e) { /* tolerate media errors */ }
+  }
+
+  function endCowatch() {
+    if (cowatchVideoEl) { try { cowatchVideoEl.pause(); } catch (e) {} }
+    clearCowatchStage();
+    cowatch.style.display = "none";
+    cowatchActive = false;
+    remoteWrap.classList.remove("cowatch"); // restore full camera stage
+    if (callMode !== "freeze") hideTopPill();
+  }
+
+  // ---------------- Top pill ----------------
+  function showTopPill(text) {
+    topPillText.textContent = clampStr(text, 200);
+    topPill.style.display = "flex";
+  }
+  function hideTopPill() { topPill.style.display = "none"; }
+
+  // ---------------- Moment toast ----------------
+  var DEFAULT_MOMENT = {
+    mark: "Coach marked the moment",
+    note: "Coach saved a note",
+    drill: "Coach added a drill"
+  };
+  var toastTimer = null;
+  function showMoment(kind, label) {
+    // Kind-based copy is the spec default. Only fall back to the coach's label
+    // when the kind is unrecognized (forward-compat with new moment types).
+    var text = DEFAULT_MOMENT[kind];
+    if (!text) {
+      text = (typeof label === "string" && label.trim()) ? clampStr(label.trim(), 120) : "Coach marked the moment";
+    }
+    toastEl.textContent = text;
+    toastEl.classList.add("show");
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { toastEl.classList.remove("show"); }, 2000);
   }
 
   function refreshRemoteState() {
@@ -408,8 +974,19 @@
 
   function teardownToLobby(msg) {
     room = null;
+    // Drop any remote audio sinks we parked on <body>.
+    audioSinks.forEach(function (s) { try { if (s.el && s.el.parentNode) s.el.parentNode.removeChild(s.el); } catch (e) {} });
+    audioSinks = [];
     remoteVideo.style.display = "none";
     localVideo.style.display = "none";
+    // Tear down in-call protocol UI so a rejoin starts clean.
+    endCowatch();
+    strokes = []; renderStrokes();
+    freezeScrim.style.display = "none";
+    hideTopPill();
+    scriptPanel.classList.remove("open");
+    setUnread(false);
+    remoteWrap.classList.remove("cowatch");
     stage.style.display = "none";
     lobby.style.display = "flex";
     joinBtn.disabled = false;
