@@ -122,7 +122,7 @@ app.get("/join/:id", (req, res) => {
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<title>Opening Sideline…</title>
+<title>Opening CoachTime…</title>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -159,7 +159,7 @@ app.get("/join/:id", (req, res) => {
 <body>
   <div class="card">
     <div class="dot" aria-hidden="true"></div>
-    <h1>Opening Sideline…</h1>
+    <h1>Opening CoachTime…</h1>
     <p>Launching the app for room <span class="room">${idHtml}</span>.<br/>No app? You'll join in the browser.</p>
     <a class="fallback" href="/web/${idHtml}">Join in browser</a>
   </div>
