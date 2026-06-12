@@ -420,6 +420,11 @@ app.post("/token", tokenLimiter, async (req, res) => {
     if (!room || !identity) {
       return res.status(400).json({ error: "room and identity are required" });
     }
+    // Same validation every other route applies — never pass an arbitrary
+    // string into a LiveKit grant (Engine finding N2, 2026-06-12).
+    if (!isValidRoomId(String(room))) {
+      return res.status(400).json({ error: "bad room id" });
+    }
 
     const at = new AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET, {
       identity: String(identity),
