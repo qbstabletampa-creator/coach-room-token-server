@@ -233,6 +233,20 @@
   #scriptList li.done .box svg { width: 12px; height: 12px; stroke: var(--gold); }
   #scriptList li.done .txt { color: var(--muted); }
   #scriptList .empty { color: var(--muted); font-size: 13px; line-height: 1.5; padding: 6px 0; }
+  #notesList { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  #notesList li { font-size: 14px; line-height: 1.4; color: var(--text); display: flex; gap: 8px; }
+  #notesList li .nt { color: var(--gold); font-weight: 600; flex: 0 0 auto; font-size: 12px; margin-top: 1px; }
+  #notesList .empty { color: var(--muted); font-size: 13px; line-height: 1.5; padding: 6px 0; }
+  /* recording pill */
+  #recPill {
+    position: absolute; left: 50%; transform: translateX(-50%);
+    top: calc(env(safe-area-inset-top, 0px) + 64px);
+    display: none; align-items: center; gap: 8px; z-index: 9;
+    background: rgba(0,0,0,0.6); border: 1px solid rgba(227,86,59,0.5);
+    color: var(--text); font-size: 13px; font-weight: 600;
+    padding: 8px 14px; border-radius: 999px;
+  }
+  #recPill .rec-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--danger); animation: pulse 1s ease-in-out infinite; }
 
   /* ---------- Moment toast ---------- */
   #toast {
@@ -294,6 +308,7 @@
     <div id="topPill"><span class="pip-dot"></span><span class="pip-text" id="topPillText"></span></div>
 
     <div id="liveBadge"><span class="live-dot"></span>LIVE</div>
+    <div id="recPill"><span class="rec-dot"></span><span id="recPillText">Recording your rep…</span></div>
 
     <!-- Practice-script checklist (read-only for the player). -->
     <div id="scriptPanel" role="region" aria-label="Practice script">
@@ -303,6 +318,10 @@
         <button class="sp-close" id="scriptCloseBtn" aria-label="Close script">&times;</button>
       </div>
       <ul id="scriptList"></ul>
+      <div class="sp-head" style="margin-top:14px">
+        <span class="sp-title">Coach notes</span>
+      </div>
+      <ul id="notesList"></ul>
     </div>
 
     <!-- Transient moment toast. -->
@@ -376,6 +395,9 @@
   var scriptProgress = document.getElementById("scriptProgress");
   var scriptCloseBtn = document.getElementById("scriptCloseBtn");
   var toastEl = document.getElementById("toast");
+  var notesList = document.getElementById("notesList");
+  var recPill = document.getElementById("recPill");
+  var recPillText = document.getElementById("recPillText");
 
   // restore last name
   try {
@@ -578,7 +600,7 @@
   function decodeMessage(payload) {
     try {
       var parsed = JSON.parse(decoder.decode(payload));
-      if (parsed && parsed.v === 1 && typeof parsed.t === "string") return parsed;
+      if (parsed && (parsed.v === 1 || parsed.v === 2) && typeof parsed.t === "string") return parsed;
       return null;
     } catch (e) { return null; }
   }
@@ -592,21 +614,24 @@
   }
 
   function sendHello(name) {
-    sendData({ v: 1, t: "hello", role: "player", name: String(name || "Guest").slice(0, 80) });
+    sendData({ v: 2, t: "hello", role: "player", name: String(name || "Guest").slice(0, 80) });
   }
 
   // ---- in-call protocol state ----
   var callMode = "face";          // face | cowatch | freeze | share
-  var strokes = [];               // [{ id, d }] normalized 0..1 SVG paths
+  var shapes = [];                // validated ShapeWire objects (v2)
   var scriptItems = null;         // null = never received; [] = empty list
+  var liveNotes = [];             // NoteWire objects from the coach
   var cowatchActive = false;
 
   function resetCallState() {
     callMode = "face";
-    strokes = [];
+    shapes = [];
     scriptItems = null;
+    liveNotes = [];
     cowatchActive = false;
-    renderStrokes();
+    stopClipRecording("reset");
+    renderShapes();
     renderScript();
     endCowatch();
     applyMode("face");
@@ -630,6 +655,42 @@
     return s;
   }
 
+  // v2 shape validation — every field of peer input checked before render.
+  var SHAPE_TOOLS = { pen: 1, line: 1, arrow: 1, circle: 1, angle: 1 };
+  var COLOR_RE = /^#[0-9A-Fa-f]{6}$/;
+  function clamp01(n) { return isNum(n) ? Math.max(-0.5, Math.min(1.5, n)) : null; }
+  function safePt(p) {
+    if (!p || typeof p !== "object") return null;
+    var x = clamp01(p.x), y = clamp01(p.y);
+    return x === null || y === null ? null : { x: x, y: y };
+  }
+  function safeShape(sh) {
+    if (!sh || typeof sh !== "object") return null;
+    if (!SHAPE_TOOLS[sh.tool]) return null;
+    var out = {
+      id: clampStr(sh.id, 64),
+      tool: sh.tool,
+      color: COLOR_RE.test(sh.color) ? sh.color : "#D4C36A",
+      width: isNum(sh.width) ? Math.max(1, Math.min(12, sh.width)) : 4
+    };
+    if (sh.tool === "pen") {
+      var d = safePath(sh.d);
+      if (!d) return null;
+      out.d = d;
+    } else if (sh.tool === "line" || sh.tool === "arrow") {
+      out.from = safePt(sh.from); out.to = safePt(sh.to);
+      if (!out.from || !out.to) return null;
+    } else if (sh.tool === "circle") {
+      out.center = safePt(sh.center);
+      out.r = isNum(sh.r) ? Math.max(0, Math.min(2, sh.r)) : null;
+      if (!out.center || out.r === null) return null;
+    } else if (sh.tool === "angle") {
+      out.p1 = safePt(sh.p1); out.p2 = safePt(sh.p2); out.p3 = safePt(sh.p3);
+      if (!out.p1 || !out.p2 || !out.p3) return null;
+    }
+    return out;
+  }
+
   function handleCallMessage(msg) {
     switch (msg.t) {
       case "mode":
@@ -638,29 +699,39 @@
       case "script:sync":
         applyScriptSync(Array.isArray(msg.items) ? msg.items : []);
         break;
-      case "draw:stroke":
-        if (msg.stroke && typeof msg.stroke === "object") {
-          var d = safePath(msg.stroke.d);
-          if (d) { strokes.push({ id: clampStr(msg.stroke.id, 64), d: d }); renderStrokes(); }
-        }
+      case "draw:shape":
+        var sh = safeShape(msg.shape);
+        if (sh) { shapes.push(sh); renderShapes(); }
         break;
       case "draw:undo":
-        strokes.pop(); renderStrokes();
+        shapes.pop(); renderShapes();
         break;
       case "draw:clear":
-        strokes = []; renderStrokes(); clearFreeze();
+        shapes = []; renderShapes(); clearFreeze();
         break;
       case "draw:sync":
-        strokes = [];
-        if (Array.isArray(msg.strokes)) {
-          msg.strokes.forEach(function (s) {
-            if (s && typeof s === "object") {
-              var d = safePath(s.d);
-              if (d) strokes.push({ id: clampStr(s.id, 64), d: d });
-            }
+        shapes = [];
+        if (Array.isArray(msg.shapes)) {
+          msg.shapes.forEach(function (raw) {
+            var ok = safeShape(raw);
+            if (ok) shapes.push(ok);
           });
         }
-        renderStrokes();
+        renderShapes();
+        break;
+      case "notes:sync":
+        applyNotesSync(Array.isArray(msg.items) ? msg.items : []);
+        break;
+      case "cowatch:rate":
+        if (cowatchVideoEl && isNum(msg.rate) && msg.rate >= 0.1 && msg.rate <= 2) {
+          try { cowatchVideoEl.playbackRate = msg.rate; } catch (e) {}
+        }
+        break;
+      case "clip:request":
+        startClipRecording(msg);
+        break;
+      case "clip:stop":
+        finishClipRecording();
         break;
       case "cowatch:load":
         loadCowatch(msg);
@@ -696,42 +767,87 @@
       showTopPill("Coach froze the frame · drawing");
       return;
     }
-    // Any non-freeze mode: drop the telestration overlay + scrim. Co-watch
-    // owns its own pill/stage, so don't touch the pill while co-watching.
-    strokes = [];
-    renderStrokes();
+    // Any non-freeze mode: the overlay stays — v2 draws over LIVE video too.
+    // Only the freeze scrim drops.
     freezeScrim.style.display = "none";
     if (!cowatchActive) hideTopPill();
   }
 
   // Clear the telestration overlay + freeze visuals (not co-watch).
   function clearFreeze() {
-    strokes = [];
-    renderStrokes();
+    shapes = [];
+    renderShapes();
     freezeScrim.style.display = "none";
     if (!cowatchActive) hideTopPill();
   }
 
-  // ---------------- Annotations (telestration) ----------------
-  // Coords arrive normalized 0..1. The SVG uses a fixed 0..1000 viewBox with
-  // preserveAspectRatio="none", so it stretches to the overlay's pixel size
-  // automatically — no manual resize math needed, and resize "just works".
+  // ---------------- Annotations (v2 shapes) ----------------
+  // Coords arrive normalized 0..1; we render in PIXEL space (viewBox matches
+  // the overlay's size) so circles stay circles and angle labels read true.
+  // Re-render on resize keeps everything proportional.
   var SVG_NS = "http://www.w3.org/2000/svg";
-  function renderStrokes() {
-    // Wipe + rebuild via DOM nodes only (never innerHTML with peer data).
+  function el(tag, attrs) {
+    var n = document.createElementNS(SVG_NS, tag);
+    for (var k in attrs) n.setAttribute(k, attrs[k]);
+    return n;
+  }
+  function angleDegrees(p1, p2, p3) {
+    var v1x = p1.x - p2.x, v1y = p1.y - p2.y;
+    var v2x = p3.x - p2.x, v2y = p3.y - p2.y;
+    var m1 = Math.hypot(v1x, v1y), m2 = Math.hypot(v2x, v2y);
+    if (!m1 || !m2) return 0;
+    var cos = Math.max(-1, Math.min(1, (v1x * v2x + v1y * v2y) / (m1 * m2)));
+    return Math.round(Math.acos(cos) * 180 / Math.PI);
+  }
+  // Denormalize a pen path "M x y L x y" from 0..1 to pixels.
+  function denormPath(d, w, h) {
+    var parts = d.split(/\s+/), axis = 0, out = [];
+    for (var i = 0; i < parts.length; i++) {
+      var tok = parts[i];
+      if (tok === "M" || tok === "L") { axis = 0; out.push(tok); continue; }
+      var n = Number(tok);
+      if (isNaN(n)) { out.push(tok); continue; }
+      out.push((n * (axis === 0 ? w : h)).toFixed(1));
+      axis = axis === 0 ? 1 : 0;
+    }
+    return out.join(" ");
+  }
+  function renderShapes() {
     while (annoSvg.firstChild) annoSvg.removeChild(annoSvg.firstChild);
-    var show = strokes.length > 0;
+    var show = shapes.length > 0;
     annoOverlay.style.display = show ? "block" : "none";
     if (!show) return;
-    for (var i = 0; i < strokes.length; i++) {
-      var p = document.createElementNS(SVG_NS, "path");
-      // d is already normalized 0..1 and matches the 0..1 viewBox 1:1.
-      p.setAttribute("d", strokes[i].d);
-      // Keep the visible line at a true 4px regardless of the 0..1 coord space.
-      p.setAttribute("vector-effect", "non-scaling-stroke");
-      annoSvg.appendChild(p);
+    var w = annoOverlay.clientWidth || 1, h = annoOverlay.clientHeight || 1;
+    annoSvg.setAttribute("viewBox", "0 0 " + w + " " + h);
+    var X = function (p) { return p.x * w; }, Y = function (p) { return p.y * h; };
+    for (var i = 0; i < shapes.length; i++) {
+      var sh = shapes[i];
+      var stroke = { stroke: sh.color, "stroke-width": sh.width, fill: "none",
+                     "stroke-linecap": "round", "stroke-linejoin": "round" };
+      if (sh.tool === "pen") {
+        annoSvg.appendChild(el("path", Object.assign({ d: denormPath(sh.d, w, h) }, stroke)));
+      } else if (sh.tool === "line") {
+        annoSvg.appendChild(el("line", Object.assign({ x1: X(sh.from), y1: Y(sh.from), x2: X(sh.to), y2: Y(sh.to) }, stroke)));
+      } else if (sh.tool === "arrow") {
+        var x1 = X(sh.from), y1 = Y(sh.from), x2 = X(sh.to), y2 = Y(sh.to);
+        var ang = Math.atan2(y2 - y1, x2 - x1), head = 14 + sh.width * 1.5;
+        annoSvg.appendChild(el("line", Object.assign({ x1: x1, y1: y1, x2: x2, y2: y2 }, stroke)));
+        annoSvg.appendChild(el("line", Object.assign({ x1: x2, y1: y2, x2: x2 + head * Math.cos(ang + Math.PI - 0.45), y2: y2 + head * Math.sin(ang + Math.PI - 0.45) }, stroke)));
+        annoSvg.appendChild(el("line", Object.assign({ x1: x2, y1: y2, x2: x2 + head * Math.cos(ang + Math.PI + 0.45), y2: y2 + head * Math.sin(ang + Math.PI + 0.45) }, stroke)));
+      } else if (sh.tool === "circle") {
+        annoSvg.appendChild(el("circle", Object.assign({ cx: X(sh.center), cy: Y(sh.center), r: sh.r * w }, stroke)));
+      } else if (sh.tool === "angle") {
+        annoSvg.appendChild(el("line", Object.assign({ x1: X(sh.p2), y1: Y(sh.p2), x2: X(sh.p1), y2: Y(sh.p1) }, stroke)));
+        annoSvg.appendChild(el("line", Object.assign({ x1: X(sh.p2), y1: Y(sh.p2), x2: X(sh.p3), y2: Y(sh.p3) }, stroke)));
+        annoSvg.appendChild(el("circle", { cx: X(sh.p2), cy: Y(sh.p2), r: 3.5, fill: sh.color }));
+        var t = el("text", { x: X(sh.p2) + 12, y: Y(sh.p2) - 12, fill: sh.color,
+                             "font-size": 16, "font-weight": 700, stroke: "none" });
+        t.textContent = angleDegrees(sh.p1, sh.p2, sh.p3) + "°";
+        annoSvg.appendChild(t);
+      }
     }
   }
+  window.addEventListener("resize", function () { if (shapes.length) renderShapes(); });
 
   // ---------------- Practice script (read-only) ----------------
   function applyScriptSync(items) {
@@ -796,6 +912,7 @@
     if (open) {
       setUnread(false);
       if (scriptItems === null) renderScript(); // show empty state
+      renderNotes();
     }
   }
   scriptBtn.addEventListener("click", toggleScript);
@@ -863,8 +980,8 @@
     cowatchActive = true;
     cowatch.style.display = "flex";
     remoteWrap.classList.add("cowatch"); // shrinks coach camera to PiP
-    // Clear any drawing overlay; co-watch is its own mode.
-    strokes = []; renderStrokes(); freezeScrim.style.display = "none";
+    // Drop the freeze scrim; shapes persist (draw-over-film is allowed in v2).
+    freezeScrim.style.display = "none";
     showTopPill("Watching with coach" + (title ? " · " + title : ""));
   }
 
@@ -892,6 +1009,168 @@
     cowatchActive = false;
     remoteWrap.classList.remove("cowatch"); // restore full camera stage
     if (callMode !== "freeze") hideTopPill();
+  }
+
+  // ---------------- Shared live notes (read-only) ----------------
+  function fmtT(t) {
+    if (!isNum(t)) return "";
+    var sec = Math.max(0, Math.floor(t));
+    return Math.floor(sec / 60) + ":" + ("0" + (sec % 60)).slice(-2);
+  }
+  function applyNotesSync(items) {
+    var clean = [];
+    for (var i = 0; i < items.length && i < 200; i++) {
+      var it = items[i];
+      if (it && typeof it === "object") {
+        clean.push({ id: clampStr(it.id, 64), t: isNum(it.t) ? it.t : null, body: clampStr(it.body, 500) });
+      }
+    }
+    liveNotes = clean;
+    renderNotes();
+    if (!scriptPanel.classList.contains("open")) setUnread(true);
+  }
+  function renderNotes() {
+    while (notesList.firstChild) notesList.removeChild(notesList.firstChild);
+    if (!liveNotes.length) {
+      var none = document.createElement("li");
+      none.className = "empty";
+      none.textContent = "No notes yet this session.";
+      notesList.appendChild(none);
+      return;
+    }
+    for (var i = liveNotes.length - 1; i >= 0; i--) {
+      var n = liveNotes[i];
+      var li = document.createElement("li");
+      if (n.t !== null) {
+        var ts = document.createElement("span");
+        ts.className = "nt";
+        ts.textContent = fmtT(n.t);
+        li.appendChild(ts);
+      }
+      var body = document.createElement("span");
+      body.textContent = n.body; // peer text -> textContent only
+      li.appendChild(body);
+      notesList.appendChild(li);
+    }
+  }
+
+  // ---------------- Live clip capture (the rep-review loop) ----------------
+  // The coach taps Clip; we record OUR OWN camera at source quality with
+  // MediaRecorder (not the compressed call video), upload to /clips/<room>,
+  // and answer clip:ready with the playable URL. clip:stop ends a take early;
+  // maxSeconds is the cap.
+  var recorder = null;
+  var recChunks = [];
+  var recClipId = null;
+  var recTimer = null;
+  var recStartedAt = 0;
+
+  function pickMime() {
+    if (!window.MediaRecorder) return null;
+    var prefs = ["video/mp4", "video/webm;codecs=vp9", "video/webm"];
+    for (var i = 0; i < prefs.length; i++) {
+      try { if (MediaRecorder.isTypeSupported(prefs[i])) return prefs[i]; } catch (e) {}
+    }
+    return "";
+  }
+
+  function startClipRecording(msg) {
+    var clipId = clampStr(msg.id, 64);
+    var maxS = isNum(msg.maxSeconds) ? Math.max(2, Math.min(30, msg.maxSeconds)) : 15;
+    if (recorder) { sendData({ v: 2, t: "clip:error", id: clipId, reason: "already recording" }); return; }
+    var mime = pickMime();
+    if (mime === null) {
+      sendData({ v: 2, t: "clip:error", id: clipId, reason: "this browser can't record video" });
+      return;
+    }
+    var pub = room && room.localParticipant ? room.localParticipant.getTrackPublication(Track.Source.Camera) : null;
+    var msTrack = pub && pub.track ? pub.track.mediaStreamTrack : null;
+    if (!msTrack) {
+      sendData({ v: 2, t: "clip:error", id: clipId, reason: "camera not available" });
+      return;
+    }
+    try {
+      var stream = new MediaStream([msTrack]);
+      recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+    } catch (e) {
+      recorder = null;
+      sendData({ v: 2, t: "clip:error", id: clipId, reason: "recorder failed to start" });
+      return;
+    }
+    recChunks = [];
+    recClipId = clipId;
+    recStartedAt = Date.now();
+    recorder.ondataavailable = function (ev) { if (ev.data && ev.data.size) recChunks.push(ev.data); };
+    recorder.onstop = function () { uploadClip(); };
+    recorder.onerror = function () {
+      sendData({ v: 2, t: "clip:error", id: recClipId || clipId, reason: "recording error" });
+      cleanupRecorder();
+    };
+    try { recorder.start(1000); } catch (e) {
+      sendData({ v: 2, t: "clip:error", id: clipId, reason: "recording error" });
+      cleanupRecorder();
+      return;
+    }
+    recPillText.textContent = "Recording your rep\u2026";
+    recPill.style.display = "flex";
+    recTimer = setTimeout(function () { finishClipRecording(); }, maxS * 1000);
+  }
+
+  function finishClipRecording() {
+    if (!recorder) return;
+    if (recTimer) { clearTimeout(recTimer); recTimer = null; }
+    recPillText.textContent = "Sending the clip\u2026";
+    try { recorder.stop(); } catch (e) {
+      sendData({ v: 2, t: "clip:error", id: recClipId, reason: "recording error" });
+      cleanupRecorder();
+    }
+  }
+
+  function stopClipRecording(_why) {
+    if (recTimer) { clearTimeout(recTimer); recTimer = null; }
+    if (recorder) { try { recorder.ondataavailable = null; recorder.onstop = null; recorder.stop(); } catch (e) {} }
+    cleanupRecorder();
+  }
+
+  function cleanupRecorder() {
+    recorder = null;
+    recChunks = [];
+    recClipId = null;
+    if (recTimer) { clearTimeout(recTimer); recTimer = null; }
+    recPill.style.display = "none";
+  }
+
+  async function uploadClip() {
+    var clipId = recClipId;
+    var durationS = Math.round((Date.now() - recStartedAt) / 1000);
+    var blob = new Blob(recChunks, { type: recChunks.length && recChunks[0].type ? recChunks[0].type : "video/webm" });
+    if (!blob.size) {
+      sendData({ v: 2, t: "clip:error", id: clipId, reason: "empty recording" });
+      cleanupRecorder();
+      return;
+    }
+    try {
+      var resp = await fetch(tokenServerOrigin() + "/clips/" + roomId, {
+        method: "POST",
+        headers: { "Content-Type": blob.type || "video/webm" },
+        body: blob
+      });
+      if (!resp.ok) {
+        var reason = "upload failed";
+        try { reason = (await resp.json()).error || reason; } catch (e) {}
+        sendData({ v: 2, t: "clip:error", id: clipId, reason: reason });
+      } else {
+        var data = await resp.json();
+        if (data && data.url) {
+          sendData({ v: 2, t: "clip:ready", id: clipId, url: data.url, durationS: durationS });
+        } else {
+          sendData({ v: 2, t: "clip:error", id: clipId, reason: "bad upload response" });
+        }
+      }
+    } catch (e) {
+      sendData({ v: 2, t: "clip:error", id: clipId, reason: "network error during upload" });
+    }
+    cleanupRecorder();
   }
 
   // ---------------- Top pill ----------------
@@ -981,7 +1260,8 @@
     localVideo.style.display = "none";
     // Tear down in-call protocol UI so a rejoin starts clean.
     endCowatch();
-    strokes = []; renderStrokes();
+    shapes = []; renderShapes();
+    stopClipRecording("left");
     freezeScrim.style.display = "none";
     hideTopPill();
     scriptPanel.classList.remove("open");

@@ -202,6 +202,76 @@ h1{font-size:20px;margin:0 0 8px}p{color:#B8B6B0;font-size:14px;margin:0}</style
 <body><div><h1>Invalid room link</h1><p>That session link doesn't look right.</p></div></body></html>`;
 }
 
+// ---- live clip upload (the rep-review loop) ---------------------------------
+// The athlete's browser records its own camera (MediaRecorder on the existing
+// getUserMedia stream — full source quality) and POSTs the bytes here; we pass
+// them straight into Supabase Storage (public "clips" bucket) and return a
+// playable https URL. Bytes never persist on this box (Render disk is
+// ephemeral). Requires SUPABASE_URL + SUPABASE_SERVICE_KEY in env; without
+// them the endpoint answers 503 so the call can toast honestly.
+
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
+
+const clipLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many clip uploads, slow down." },
+});
+
+app.post(
+  "/clips/:room",
+  clipLimiter,
+  express.raw({ type: ["video/*", "application/octet-stream"], limit: "40mb" }),
+  async (req, res) => {
+    try {
+      if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+        return res.status(503).json({ error: "clip storage not configured" });
+      }
+      const room = req.params.room || "";
+      if (!isValidRoomId(room)) {
+        return res.status(400).json({ error: "bad room id" });
+      }
+      const body = req.body;
+      if (!body || !body.length) {
+        return res.status(400).json({ error: "empty clip" });
+      }
+      const contentType = String(req.headers["content-type"] || "video/webm");
+      const ext = contentType.includes("mp4") ? "mp4" : "webm";
+      const objectPath = `${room}/${Date.now()}-${Math.random()
+        .toString(36)
+        .slice(2, 8)}.${ext}`;
+
+      const up = await fetch(
+        `${SUPABASE_URL}/storage/v1/object/clips/${objectPath}`,
+        {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+            "content-type": contentType,
+            "x-upsert": "false",
+          },
+          body,
+        },
+      );
+      if (!up.ok) {
+        const detail = await up.text().catch(() => "");
+        console.error("[token-server] clip upload failed:", up.status, detail);
+        return res.status(502).json({ error: "storage upload failed" });
+      }
+
+      res.json({
+        url: `${SUPABASE_URL}/storage/v1/object/public/clips/${objectPath}`,
+      });
+    } catch (err) {
+      console.error("[token-server] clip upload error:", err);
+      res.status(500).json({ error: "clip upload failed" });
+    }
+  },
+);
+
 // ---- token mint ------------------------------------------------------------
 
 // Rate limit: 30 requests / minute / IP. Token mints are cheap and signed
