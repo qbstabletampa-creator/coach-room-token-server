@@ -272,6 +272,132 @@ app.post(
   },
 );
 
+// ---- claim links (athlete identity) -----------------------------------------
+// The coach mints a single-use token (athlete_claims row); the athlete taps
+// the link and claims the card — no sign-up. GET renders the landing page;
+// POST (with a Supabase user JWT) performs the bind server-side with the
+// service key: athletes.user_id + claim consumed. Single-use + expiring.
+
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+async function lookupClaim(token) {
+  const resp = await fetch(
+    `${SUPABASE_URL}/rest/v1/athlete_claims?token=eq.${token}` +
+      `&select=token,expires_at,claimed_at,athlete_id,athletes(name),coaches:coach_id(full_name)`,
+    {
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+      },
+    },
+  );
+  if (!resp.ok) return null;
+  const rows = await resp.json();
+  return rows && rows[0] ? rows[0] : null;
+}
+
+app.get("/claim/:token", async (req, res) => {
+  const token = req.params.token || "";
+  if (!UUID_RE.test(token) || !SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+    return res.status(400).type("html").send(invalidRoomPage());
+  }
+  const claim = await lookupClaim(token).catch(() => null);
+  const valid =
+    claim && !claim.claimed_at && new Date(claim.expires_at).getTime() > Date.now();
+  const athleteName = escapeHtml(claim?.athletes?.name ?? "Athlete");
+  const coachName = escapeHtml(claim?.coaches?.full_name ?? "Your coach");
+
+  res.type("html").send(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>CoachTime — You're invited</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { height: 100%; margin: 0; }
+  body { background:#0E0E0F; color:#F2F0EB; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+         display:flex; align-items:center; justify-content:center; text-align:center; padding:24px; }
+  .card { background:#16161A; border-radius:12px; padding:40px 32px; max-width:400px; width:100%;
+          box-shadow:0 12px 48px rgba(0,0,0,0.45); }
+  .brand { font-size:13px; letter-spacing:2px; text-transform:uppercase; color:#D4C36A; margin:0 0 14px; font-weight:600; }
+  h1 { font-size:22px; margin:0 0 8px; }
+  p { font-size:14px; line-height:1.55; color:#B8B6B0; margin:0 0 22px; }
+  .gold { color:#D4C36A; font-weight:600; }
+  a.cta { display:inline-block; color:#0E0E0F; background:#D4C36A; text-decoration:none;
+          font-weight:700; font-size:15px; padding:13px 24px; border-radius:8px; }
+</style></head><body><div class="card">
+  <p class="brand">CoachTime</p>
+  ${
+    valid
+      ? `<h1>${athleteName}, you're in.</h1>
+         <p><span class="gold">${coachName}</span> set up your spot — your film, your punch lists, and your live sessions in one place. No sign-up, just claim it.</p>
+         <a class="cta" href="coachroomapp://claim/${escapeHtml(token)}">Claim my spot</a>
+         <p style="margin-top:18px;font-size:12.5px">Claiming finishes inside the CoachTime app. Browser claiming is coming next.</p>`
+      : `<h1>This invite has expired.</h1>
+         <p>Ask your coach to send a fresh link — it takes them one tap.</p>`
+  }
+</div></body></html>`);
+});
+
+// POST /claim/:token  (Authorization: Bearer <supabase user JWT>)
+// Binds the athlete card to the authenticated user. Single-use.
+const claimLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 15,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many claim attempts, slow down." },
+});
+
+app.post("/claim/:token", claimLimiter, async (req, res) => {
+  try {
+    const token = req.params.token || "";
+    if (!UUID_RE.test(token)) return res.status(400).json({ error: "bad token" });
+    if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+      return res.status(503).json({ error: "claims not configured" });
+    }
+    const auth = req.headers.authorization || "";
+    const jwt = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+    if (!jwt) return res.status(401).json({ error: "sign in to claim" });
+
+    // Verify the user JWT against Supabase auth.
+    const uResp = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+      headers: { apikey: SUPABASE_SERVICE_KEY, authorization: `Bearer ${jwt}` },
+    });
+    if (!uResp.ok) return res.status(401).json({ error: "invalid session" });
+    const user = await uResp.json();
+    if (!user?.id) return res.status(401).json({ error: "invalid session" });
+
+    const claim = await lookupClaim(token);
+    if (!claim) return res.status(404).json({ error: "claim not found" });
+    if (claim.claimed_at) return res.status(409).json({ error: "already claimed" });
+    if (new Date(claim.expires_at).getTime() <= Date.now()) {
+      return res.status(410).json({ error: "claim expired" });
+    }
+
+    const svcHeaders = {
+      apikey: SUPABASE_SERVICE_KEY,
+      authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+      "content-type": "application/json",
+      prefer: "return=minimal",
+    };
+    const r1 = await fetch(
+      `${SUPABASE_URL}/rest/v1/athletes?id=eq.${claim.athlete_id}`,
+      { method: "PATCH", headers: svcHeaders, body: JSON.stringify({ user_id: user.id }) },
+    );
+    if (!r1.ok) return res.status(502).json({ error: "claim failed" });
+    await fetch(`${SUPABASE_URL}/rest/v1/athlete_claims?token=eq.${token}`, {
+      method: "PATCH",
+      headers: svcHeaders,
+      body: JSON.stringify({ claimed_by: user.id, claimed_at: new Date().toISOString() }),
+    });
+
+    res.json({ ok: true, athleteId: claim.athlete_id });
+  } catch (err) {
+    console.error("[token-server] claim error:", err);
+    res.status(500).json({ error: "claim failed" });
+  }
+});
+
 // ---- token mint ------------------------------------------------------------
 
 // Rate limit: 30 requests / minute / IP. Token mints are cheap and signed
