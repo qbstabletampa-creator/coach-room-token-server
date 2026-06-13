@@ -1,2 +1,4 @@
 node_modules/
 .env
+.pmloop/
+public/analyze/_sample/

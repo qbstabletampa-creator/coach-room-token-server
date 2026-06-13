@@ -37,7 +37,15 @@ app.use(
       useDefaults: true,
       directives: {
         "default-src": ["'self'"],
-        "script-src": ["'self'", "'unsafe-inline'", "https://cdn.jsdelivr.net"],
+        // 'wasm-unsafe-eval' lets the Analyze v1 pose engine compile MediaPipe's
+        // WebAssembly module. It permits WASM compilation ONLY, not arbitrary
+        // eval() of JS strings, so it's far narrower than 'unsafe-eval'.
+        "script-src": [
+          "'self'",
+          "'unsafe-inline'",
+          "'wasm-unsafe-eval'",
+          "https://cdn.jsdelivr.net",
+        ],
         "style-src": ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
         "font-src": ["'self'", "https://fonts.gstatic.com"],
         "img-src": ["'self'", "data:", "blob:"],
@@ -46,11 +54,15 @@ app.use(
         // <video src>. Scoped to https: rather than "*" to keep it tight.
         "media-src": ["'self'", "blob:", "mediastream:", "https:"],
         // LiveKit signalling + ICE: wss/https to livekit.cloud, plus blob workers.
+        // Analyze v1 (public/analyze) loads MediaPipe Tasks-Vision from jsDelivr
+        // and the pose model .task from storage.googleapis.com, so both must be
+        // reachable via connect-src or the pose pipeline can't fetch the model.
         "connect-src": [
           "'self'",
           "https://*.livekit.cloud",
           "wss://*.livekit.cloud",
           "https://cdn.jsdelivr.net",
+          "https://storage.googleapis.com",
         ],
         "worker-src": ["'self'", "blob:"],
         // frame-src: co-watch YouTube/Drive embeds ONLY. No other origins.
@@ -65,6 +77,77 @@ app.use(
 app.use(cors()); // open CORS for now — the iOS app + the browser join page both need it.
                  // Full Supabase-JWT auth on /token is a later phase (see README).
 app.use(express.json());
+
+// ---- Analyze v1: same-origin CORS proxy --------------------------------------
+// The pose analyzer (public/analyze) reads video frames into a canvas, which
+// requires the video to be same-origin OR served with CORS headers. Supabase
+// public storage doesn't always send permissive CORS for video, so when a
+// direct cross-origin load taints the canvas, the page retries through here.
+// This route streams the remote clip back same-origin (no taint).
+//
+// SSRF guard: ONLY the Supabase storage host is allowed. Any other host -> 400.
+// This is an exact-host allowlist, not a substring check, so look-alike hosts
+// (e.g. elcisvvbkwgsypdtlbht.supabase.co.evil.com) are rejected.
+const ALLOWED_PROXY_HOST = "elcisvvbkwgsypdtlbht.supabase.co";
+
+// Defined BEFORE express.static. The exact path "/analyze/proxy" never collides
+// with a real static file under public/analyze/ (there is no file named
+// "proxy"), so it does not shadow the analyzer's assets.
+app.get("/analyze/proxy", async (req, res) => {
+  const raw = req.query.url;
+  if (typeof raw !== "string" || !raw) {
+    return res.status(400).json({ error: "url query param required" });
+  }
+
+  let target;
+  try {
+    target = new URL(raw);
+  } catch {
+    return res.status(400).json({ error: "invalid url" });
+  }
+
+  // Only https + the exact Supabase storage host. Reject everything else.
+  if (target.protocol !== "https:" || target.hostname !== ALLOWED_PROXY_HOST) {
+    return res.status(400).json({ error: "host not allowed" });
+  }
+
+  try {
+    // Forward Range so the <video> can seek (byte-range requests).
+    const fwdHeaders = {};
+    if (req.headers.range) fwdHeaders.range = req.headers.range;
+
+    const upstream = await fetch(target.toString(), {
+      method: "GET",
+      headers: fwdHeaders,
+      redirect: "follow",
+    });
+
+    // Mirror status (200 or 206 for partial content; 4xx/5xx pass through too).
+    res.status(upstream.status);
+
+    // Pass through the headers the player needs for seeking/sizing.
+    const ct = upstream.headers.get("content-type");
+    const cl = upstream.headers.get("content-length");
+    const ar = upstream.headers.get("accept-ranges");
+    const cr = upstream.headers.get("content-range");
+    if (ct) res.setHeader("content-type", ct);
+    if (cl) res.setHeader("content-length", cl);
+    if (ar) res.setHeader("accept-ranges", ar);
+    if (cr) res.setHeader("content-range", cr);
+
+    if (!upstream.body) {
+      return res.end();
+    }
+
+    // Stream the bytes through without buffering the whole clip in memory.
+    const { Readable } = require("stream");
+    Readable.fromWeb(upstream.body).pipe(res);
+  } catch (err) {
+    console.error("[token-server] analyze proxy error:", err);
+    if (!res.headersSent) res.status(502).json({ error: "proxy fetch failed" });
+    else res.end();
+  }
+});
 
 // Serve static assets (public/join.html etc.)
 app.use(express.static(path.join(__dirname, "public")));

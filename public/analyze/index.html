@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>QB Motion Capture | QB Stable</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F3C8;</text></svg>">
+  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js"></script>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <!-- Header -->
+  <header id="app-header">
+    <div class="header-left">
+      <div class="logo">
+        <span class="logo-qb">QB</span>
+        <span class="logo-sep">|</span>
+        <span class="logo-text">Motion Capture</span>
+      </div>
+    </div>
+    <div class="header-right">
+      <button class="btn btn-sm btn-ghost" id="btn-sessions-nav" style="display:none;">Sessions</button>
+      <span class="brand-tag">by QB Stable</span>
+    </div>
+  </header>
+
+  <main>
+    <!-- Upload Screen -->
+    <section id="upload-screen" class="screen active">
+      <div class="upload-hero">
+        <div class="upload-zone" id="upload-zone">
+          <div class="upload-icon" aria-hidden="true">
+            <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="#D4C36A" stroke-width="1.5">
+              <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+          </div>
+          <h2>Upload Throwing Video</h2>
+          <p>Drop a video here or tap to select</p>
+          <p class="upload-hint">MP4, MOV, WebM. Side-angle footage works best.</p>
+          <input type="file" id="video-input" accept="video/*" hidden>
+          <div class="upload-actions">
+            <button class="btn btn-gold" id="btn-upload">Choose Video</button>
+            <button class="btn btn-ghost" id="btn-camera">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/><circle cx="12" cy="13" r="4"/></svg>
+              Record Live
+            </button>
+          </div>
+          <button class="btn btn-ghost btn-sessions-link" id="btn-view-sessions" style="display:none;">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+            View Past Sessions
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- CDN Error Screen -->
+    <section id="error-screen" class="screen">
+      <div class="error-content">
+        <div class="error-icon" aria-hidden="true">
+          <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="#ff4444" stroke-width="1.5">
+            <circle cx="12" cy="12" r="10"/>
+            <line x1="12" y1="8" x2="12" y2="12"/>
+            <line x1="12" y1="16" x2="12.01" y2="16"/>
+          </svg>
+        </div>
+        <h2>Failed to Load Pose Detection</h2>
+        <p id="error-detail">Could not load the MediaPipe pose detection model. Check your internet connection and try again.</p>
+        <button class="btn btn-gold" id="btn-retry">Retry</button>
+      </div>
+    </section>
+
+    <!-- Analysis Screen -->
+    <section id="analysis-screen" class="screen">
+      <!-- Top Bar: View Controls + Actions -->
+      <div class="analysis-toolbar">
+        <div class="toolbar-left">
+          <div class="view-toggle" role="tablist" aria-label="View mode">
+            <button class="view-btn active" data-view="overlay" id="btn-overlay" role="tab" aria-selected="true">Overlay</button>
+            <button class="view-btn" data-view="sidebyside" id="btn-sidebyside" role="tab" aria-selected="false">Split</button>
+            <button class="view-btn" data-view="skeleton" id="btn-skeleton" role="tab" aria-selected="false">Skeleton</button>
+          </div>
+        </div>
+        <div class="toolbar-center">
+          <div class="tab-switcher" role="tablist" aria-label="Analysis view">
+            <button class="tab-btn active" data-tab="analysis" role="tab" aria-selected="true">Analysis</button>
+            <button class="tab-btn" data-tab="kinematic" role="tab" aria-selected="false">Kinematic</button>
+            <button class="tab-btn" data-tab="report" role="tab" aria-selected="false">Report Card</button>
+          </div>
+        </div>
+        <div class="toolbar-right">
+          <button class="btn btn-icon" id="btn-stromotion" title="Generate Stromotion Composite" aria-label="Generate stromotion composite">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="2"/><path d="M7 2v20M17 2v20M2 12h20"/></svg>
+          </button>
+          <button class="btn btn-icon" id="btn-export-csv" title="Export CSV" aria-label="Export CSV">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+          </button>
+          <button class="btn btn-icon" id="btn-export-json" title="Export JSON" aria-label="Export JSON">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h8"/></svg>
+          </button>
+          <button class="btn btn-sm btn-gold" id="btn-export-pdf" title="Generate PDF Report" aria-label="Generate PDF report">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+            PDF
+          </button>
+          <button class="btn btn-sm btn-ghost" id="btn-new-video">New Video</button>
+        </div>
+      </div>
+
+      <!-- Main Video Area: Split 2D/3D Panel -->
+      <div class="video-stage" id="video-stage">
+        <div class="video-panel" id="video-panel">
+          <video id="source-video" playsinline muted></video>
+          <canvas id="overlay-canvas"></canvas>
+          <button class="btn btn-sm btn-ghost zoom-reset-pill" id="btn-zoom-reset" aria-label="Reset zoom" style="display:none;">Reset Zoom</button>
+        </div>
+        <div class="panel-divider" id="panel-divider" role="separator" aria-label="Drag to resize panels" tabindex="0">
+          <div class="divider-grip"></div>
+        </div>
+        <div class="skeleton-panel" id="skeleton-panel">
+          <canvas id="skeleton-canvas"></canvas>
+        </div>
+      </div>
+
+      <!-- Playback Controls (inline below video) -->
+      <div class="playback-bar">
+        <div class="scrub-row">
+          <span class="time-display" id="current-time">0:00.00</span>
+          <div class="scrub-track">
+            <input type="range" id="scrub-slider" min="0" max="1000" value="0" step="1" aria-label="Scrub through video frames">
+          </div>
+          <span class="time-display" id="total-time">0:00.00</span>
+        </div>
+        <div class="transport-row">
+          <button class="transport-btn" id="btn-prev-frame" title="Previous Frame (Left Arrow)" aria-label="Previous frame">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg>
+          </button>
+          <button class="transport-btn play-btn" id="btn-play" title="Play/Pause (Space)" aria-label="Play or pause">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" id="play-icon"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" id="pause-icon" style="display:none"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg>
+          </button>
+          <button class="transport-btn" id="btn-next-frame" title="Next Frame (Right Arrow)" aria-label="Next frame">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M16 6h2v12h-2zM4.5 12l8.5-6v12z" transform="rotate(180 12 12)"/></svg>
+          </button>
+          <div class="speed-pill">
+            <select id="speed-select" aria-label="Playback speed">
+              <option value="0.1">0.1x</option>
+              <option value="0.25">0.25x</option>
+              <option value="0.5">0.5x</option>
+              <option value="1" selected>1x</option>
+            </select>
+          </div>
+          <span class="frame-counter" id="frame-counter">Frame: 0 / 0</span>
+        </div>
+      </div>
+
+      <!-- Bottom Data Tiles (OnForm style) -->
+      <div class="data-tiles-strip" id="data-tiles-strip" role="region" aria-label="Angle measurements">
+        <div class="data-tile" id="tile-elbow" tabindex="0" role="button" aria-label="Elbow angle details">
+          <div class="tile-indicator" id="tile-indicator-elbow"></div>
+          <span class="tile-label">Elbow</span>
+          <span class="tile-value" id="tile-value-elbow">--</span>
+          <span class="tile-unit">&deg;</span>
+        </div>
+        <div class="data-tile" id="tile-shoulder" tabindex="0" role="button" aria-label="Shoulder angle details">
+          <div class="tile-indicator" id="tile-indicator-shoulder"></div>
+          <span class="tile-label">Shoulder</span>
+          <span class="tile-value" id="tile-value-shoulder">--</span>
+          <span class="tile-unit">&deg;</span>
+        </div>
+        <div class="data-tile" id="tile-hip" tabindex="0" role="button" aria-label="Hip rotation details">
+          <div class="tile-indicator" id="tile-indicator-hip"></div>
+          <span class="tile-label">Hip Rot.</span>
+          <span class="tile-value" id="tile-value-hip">--</span>
+          <span class="tile-unit">&deg;</span>
+        </div>
+        <div class="data-tile" id="tile-knee" tabindex="0" role="button" aria-label="Front knee angle details">
+          <div class="tile-indicator" id="tile-indicator-knee"></div>
+          <span class="tile-label">Front Knee</span>
+          <span class="tile-value" id="tile-value-knee">--</span>
+          <span class="tile-unit">&deg;</span>
+        </div>
+        <div class="data-tile" id="tile-release" tabindex="0" role="button" aria-label="Release height details">
+          <div class="tile-indicator" id="tile-indicator-release"></div>
+          <span class="tile-label">Release Ht.</span>
+          <span class="tile-value" id="tile-value-release">--</span>
+          <span class="tile-unit">&deg;</span>
+        </div>
+      </div>
+
+      <!-- Expanded Tile Detail Panel (hidden by default) -->
+      <div class="tile-detail-panel" id="tile-detail-panel" role="region" aria-label="Metric detail">
+        <div class="tile-detail-header">
+          <h3 id="tile-detail-title">Elbow Angle</h3>
+          <button class="btn btn-icon btn-close-detail" id="btn-close-detail" aria-label="Close detail panel">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+        <div class="tile-detail-body">
+          <div class="detail-stat">
+            <span class="detail-stat-label">Current</span>
+            <span class="detail-stat-value" id="detail-current">--</span>
+          </div>
+          <div class="detail-stat">
+            <span class="detail-stat-label">Ideal Range</span>
+            <span class="detail-stat-value detail-range" id="detail-range">--</span>
+          </div>
+          <div class="detail-stat">
+            <span class="detail-stat-label">Peak Max</span>
+            <span class="detail-stat-value clickable-peak" id="detail-peak-max" tabindex="0" role="button">--</span>
+          </div>
+          <div class="detail-stat">
+            <span class="detail-stat-label">Peak Min</span>
+            <span class="detail-stat-value clickable-peak" id="detail-peak-min" tabindex="0" role="button">--</span>
+          </div>
+          <div class="detail-stat">
+            <span class="detail-stat-label">Velocity</span>
+            <span class="detail-stat-value" id="detail-velocity">--</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Peak Values as Clickable Badges -->
+      <div class="peak-badges" id="peak-badges" role="region" aria-label="Peak values">
+        <!-- Filled dynamically -->
+      </div>
+
+      <!-- TAB: Analysis (default) - Scrollable content below tiles -->
+      <div class="tab-content" id="tab-analysis">
+        <!-- Data Density -->
+        <div class="info-card" role="region" aria-label="Data density statistics">
+          <h3 class="card-title">Data Density</h3>
+          <div class="card-grid">
+            <div class="card-stat">
+              <span class="card-stat-label">Detected FPS</span>
+              <span class="card-stat-value" id="density-fps">--</span>
+            </div>
+            <div class="card-stat">
+              <span class="card-stat-label">Total Frames</span>
+              <span class="card-stat-value" id="density-frames">--</span>
+            </div>
+            <div class="card-stat">
+              <span class="card-stat-label">Data Points</span>
+              <span class="card-stat-value" id="density-points">--</span>
+            </div>
+            <div class="card-stat">
+              <span class="card-stat-label">Points / Sec</span>
+              <span class="card-stat-value" id="density-per-sec">--</span>
+            </div>
+          </div>
+          <p class="card-note" id="density-comparison">--</p>
+        </div>
+
+        <!-- Angular Velocity -->
+        <div class="info-card" role="region" aria-label="Angular velocity">
+          <h3 class="card-title">Angular Velocity</h3>
+          <div class="card-grid">
+            <div class="card-stat">
+              <span class="card-stat-label">Elbow</span>
+              <span class="card-stat-value" id="vel-elbow">--</span>
+              <span class="card-stat-unit">&deg;/s</span>
+            </div>
+            <div class="card-stat">
+              <span class="card-stat-label">Shoulder</span>
+              <span class="card-stat-value" id="vel-shoulder">--</span>
+              <span class="card-stat-unit">&deg;/s</span>
+            </div>
+            <div class="card-stat">
+              <span class="card-stat-label">Hip Rot.</span>
+              <span class="card-stat-value" id="vel-hip">--</span>
+              <span class="card-stat-unit">&deg;/s</span>
+            </div>
+            <div class="card-stat">
+              <span class="card-stat-label">Front Knee</span>
+              <span class="card-stat-value" id="vel-knee">--</span>
+              <span class="card-stat-unit">&deg;/s</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Angle Over Time Chart -->
+        <div class="info-card" role="region" aria-label="Angle over time chart">
+          <h3 class="card-title">Angle Over Time</h3>
+          <canvas id="angle-chart" width="800" height="300"></canvas>
+          <div class="chart-legend">
+            <span class="legend-item"><span class="legend-swatch" style="background:#D4C36A"></span> Elbow</span>
+            <span class="legend-item"><span class="legend-swatch" style="background:#ffffff"></span> Shoulder</span>
+            <span class="legend-item"><span class="legend-swatch" style="background:#ff4444"></span> Hip Rotation</span>
+            <span class="legend-item"><span class="legend-swatch" style="background:#4488ff"></span> Front Knee</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB: Kinematic Sequence Chart -->
+      <div class="tab-content hidden" id="tab-kinematic">
+        <div class="info-card">
+          <h3 class="card-title">Kinematic Sequence</h3>
+          <p class="card-subtitle">Angular velocity over time. Proper sequence: hips fire first, then shoulders, arm, wrist.</p>
+          <canvas id="kinematic-chart" width="800" height="350"></canvas>
+          <div class="chart-legend">
+            <span class="legend-item"><span class="legend-swatch" style="background:#ff4444"></span> Hips</span>
+            <span class="legend-item"><span class="legend-swatch" style="background:#44cc44"></span> Shoulders</span>
+            <span class="legend-item"><span class="legend-swatch" style="background:#4488ff"></span> Throwing Arm</span>
+            <span class="legend-item"><span class="legend-swatch" style="background:#D4C36A"></span> Wrist</span>
+          </div>
+          <div class="kinematic-events" id="kinematic-events">
+            <!-- Filled dynamically -->
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB: Report Card -->
+      <div class="tab-content hidden" id="tab-report">
+        <div class="report-header">
+          <h3 class="card-title">Mechanics Report Card</h3>
+          <div class="report-overall" id="report-overall">
+            <span class="report-grade-big" id="report-grade-overall">--</span>
+            <span class="report-score-label">Overall</span>
+          </div>
+        </div>
+        <div class="report-grid" id="report-grid">
+          <!-- 8 report cards filled dynamically -->
+        </div>
+      </div>
+
+      <!-- Stromotion Modal -->
+      <div class="modal-overlay" id="stromotion-modal">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h3>Stromotion Composite</h3>
+            <button class="btn btn-icon btn-close-detail" id="btn-close-stromotion" aria-label="Close stromotion">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          </div>
+          <canvas id="stromotion-canvas"></canvas>
+          <div class="modal-actions">
+            <button class="btn btn-gold" id="btn-download-stromotion">Download Image</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Processing Overlay -->
+      <div class="processing-overlay" id="processing-overlay">
+        <div class="processing-content">
+          <div class="spinner"></div>
+          <p id="processing-text">Analyzing poses...</p>
+          <div class="processing-meta" id="processing-meta">
+            <span class="meta-item" id="meta-filename"></span>
+            <span class="meta-item" id="meta-filesize"></span>
+            <span class="meta-item" id="meta-duration"></span>
+            <span class="meta-item" id="meta-fps"></span>
+          </div>
+          <div class="progress-bar">
+            <div class="progress-fill" id="progress-fill" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+          </div>
+          <p class="progress-label" id="progress-label">0%</p>
+          <div class="processing-steps" id="processing-steps">
+            <div class="step" data-step="uploading"><span class="step-icon"></span> Load Video</div>
+            <div class="step" data-step="detecting_fps"><span class="step-icon"></span> Detect FPS</div>
+            <div class="step" data-step="loading_model"><span class="step-icon"></span> Load Model</div>
+            <div class="step" data-step="analyzing"><span class="step-icon"></span> Analyze</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Session Naming Modal -->
+      <div class="modal-overlay" id="naming-modal">
+        <div class="modal-content naming-modal-content">
+          <div class="modal-header">
+            <h3>Name This Session</h3>
+          </div>
+          <form id="naming-form" class="naming-form">
+            <div class="form-group">
+              <label for="input-athlete-name">Athlete Name</label>
+              <input type="text" id="input-athlete-name" placeholder="e.g. John Smith" autocomplete="off">
+            </div>
+            <div class="form-group">
+              <label for="input-session-name">Session Name</label>
+              <input type="text" id="input-session-name" placeholder="e.g. Pre-game warmup">
+            </div>
+            <div class="form-group">
+              <label>Tags</label>
+              <div class="tag-selector" id="tag-selector">
+                <button type="button" class="tag-option" data-tag="Practice">Practice</button>
+                <button type="button" class="tag-option" data-tag="Game">Game</button>
+                <button type="button" class="tag-option" data-tag="Drill">Drill</button>
+                <button type="button" class="tag-option" data-tag="Assessment">Assessment</button>
+              </div>
+            </div>
+            <div class="form-group">
+              <label for="input-session-date">Date</label>
+              <input type="date" id="input-session-date">
+            </div>
+            <div class="form-group">
+              <label for="input-session-notes">Notes</label>
+              <textarea id="input-session-notes" rows="3" placeholder="Optional notes about this session..."></textarea>
+            </div>
+            <div class="naming-actions">
+              <button type="button" class="btn btn-ghost" id="btn-skip-naming">Skip</button>
+              <button type="submit" class="btn btn-gold" id="btn-save-naming">Save & Continue</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </section>
+
+    <!-- Sessions Screen -->
+    <section id="sessions-screen" class="screen">
+      <div class="sessions-header">
+        <div class="sessions-header-left">
+          <button class="btn btn-sm btn-ghost" id="btn-sessions-back">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+            Back
+          </button>
+          <h2>Sessions</h2>
+        </div>
+        <div class="sessions-header-right">
+          <input type="search" id="sessions-search" placeholder="Search athlete or session..." class="sessions-search-input">
+        </div>
+      </div>
+      <div class="sessions-grid" id="sessions-grid">
+        <!-- Filled dynamically -->
+      </div>
+      <div class="sessions-empty" id="sessions-empty" style="display:none;">
+        <p>No sessions saved yet. Upload a video to get started.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <p>QB Motion Capture &copy; 2026 QB Stable. All video processed locally in your browser.</p>
+  </footer>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
