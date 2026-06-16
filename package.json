@@ -4,7 +4,8 @@
   "description": "Mints LiveKit access tokens for the Coach Room live coaching room. Server-side only — holds the LiveKit API secret.",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node --test test/clips.test.js"
   },
   "dependencies": {
     "cors": "^2.8.5",

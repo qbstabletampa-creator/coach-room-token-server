@@ -26,6 +26,15 @@ const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 // is unset the server still boots (LiveKit-only deploys), but ticket mint/verify
 // are disabled and only Supabase-JWT callers can reach /token — fail closed.
 const ROOM_TICKET_SECRET = process.env.ROOM_TICKET_SECRET;
+
+// Phase 0 security: clips are a minor's footage, so they live in a PRIVATE
+// bucket and are served only via short-lived signed URLs (never a world-readable
+// public URL). Bucket name is overridable for staging; default is clips-private.
+const CLIPS_BUCKET = process.env.CLIPS_BUCKET || "clips-private";
+// Signed-URL lifetime in seconds. 7 days: long enough for a coach to review a
+// rep over the following days without re-signing, short enough that a leaked URL
+// expires. The app re-signs on demand for older clips (see migration runbook).
+const CLIP_SIGN_TTL_S = Number(process.env.CLIP_SIGN_TTL_S || 7 * 24 * 60 * 60);
 // How long a minted room ticket stays valid. 30 min: a coach shares a browser
 // link, the athlete opens it within the half hour. Short enough that a leaked
 // link dies fast, long enough to absorb "open it in a few minutes".
@@ -320,6 +329,70 @@ function verifyRoomTicket(ticket, room) {
   return payload.room;
 }
 
+// ---- clip storage helpers (Phase 0 security) -------------------------------
+
+// Validate the REAL file type by magic bytes, not the client's Content-Type
+// header (which a malicious uploader controls). We only accept the two container
+// formats MediaRecorder produces:
+//   WebM/Matroska: EBML header 1A 45 DF A3 at offset 0.
+//   MP4/QuickTime: an ISO-BMFF box with "ftyp" at bytes 4..8 ("....ftyp...").
+// Anything else (a script, an html page, a zip) is rejected with 415 before it
+// ever reaches storage. Returns "webm" | "mp4" | null.
+function sniffVideoMagic(buf) {
+  if (!buf || buf.length < 12) return null;
+  // WebM / Matroska EBML.
+  if (
+    buf[0] === 0x1a &&
+    buf[1] === 0x45 &&
+    buf[2] === 0xdf &&
+    buf[3] === 0xa3
+  ) {
+    return "webm";
+  }
+  // MP4 / ISO-BMFF: "ftyp" at offset 4. (Box size is bytes 0..4, type 4..8.)
+  if (
+    buf[4] === 0x66 && // f
+    buf[5] === 0x74 && // t
+    buf[6] === 0x79 && // y
+    buf[7] === 0x70 // p
+  ) {
+    return "mp4";
+  }
+  return null;
+}
+
+// Mint a short-lived signed URL for a private-bucket object. Calls the Supabase
+// Storage sign endpoint with the service key and returns a fully-qualified https
+// URL the client can GET directly (no signature -> Supabase returns 400/403).
+// Returns the signed URL string, or null on failure (caller decides the status).
+async function signClipUrl(objectPath) {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return null;
+  const resp = await fetch(
+    `${SUPABASE_URL}/storage/v1/object/sign/${CLIPS_BUCKET}/${objectPath}`,
+    {
+      method: "POST",
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ expiresIn: CLIP_SIGN_TTL_S }),
+    },
+  );
+  if (!resp.ok) {
+    const detail = await resp.text().catch(() => "");
+    console.error("[token-server] clip sign failed:", resp.status, detail);
+    return null;
+  }
+  const data = await resp.json().catch(() => null);
+  // Supabase returns { signedURL: "/object/sign/<bucket>/<path>?token=..." } —
+  // a path relative to /storage/v1. Make it absolute so the client can fetch it.
+  const signed = data && (data.signedURL || data.signedUrl);
+  if (!signed || typeof signed !== "string") return null;
+  const rel = signed.startsWith("/") ? signed : `/${signed}`;
+  return `${SUPABASE_URL}/storage/v1${rel}`;
+}
+
 // ---- routes ----------------------------------------------------------------
 
 app.get("/health", (_req, res) => {
@@ -426,11 +499,20 @@ h1{font-size:20px;margin:0 0 8px}p{color:#B8B6B0;font-size:14px;margin:0}</style
 
 // ---- live clip upload (the rep-review loop) ---------------------------------
 // The athlete's browser records its own camera (MediaRecorder on the existing
-// getUserMedia stream — full source quality) and POSTs the bytes here; we pass
-// them straight into Supabase Storage (public "clips" bucket) and return a
-// playable https URL. Bytes never persist on this box (Render disk is
+// getUserMedia stream — full source quality) and POSTs the bytes here; we push
+// them into a PRIVATE Supabase Storage bucket (CLIPS_BUCKET) and return a
+// short-lived SIGNED https URL. Bytes never persist on this box (Render disk is
 // ephemeral). Requires SUPABASE_URL + SUPABASE_SERVICE_KEY in env; without
 // them the endpoint answers 503 so the call can toast honestly.
+//
+// Phase 0 security (3 changes vs the old route):
+//   1. AUTH: same dual-auth as /token. A verified Supabase user JWT (coach /
+//      native athlete) OR a valid room ticket scoped to :room (browser athlete).
+//      No credential -> 401. This kills "anyone can write 40MB to our bucket".
+//   2. PRIVATE bucket + signed URL: writes go to the private CLIPS_BUCKET and we
+//      return a signed URL, so a minor's footage is not world-readable by URL.
+//   3. MAGIC-BYTE validation: the real bytes must be WebM or MP4, not just a
+//      trusted Content-Type header. Non-video -> 415.
 
 // SUPABASE_URL / SUPABASE_SERVICE_KEY are declared once near the top of the file
 // (the Phase 0 /token auth helper needs them before this point).
@@ -456,18 +538,51 @@ app.post(
       if (!isValidRoomId(room)) {
         return res.status(400).json({ error: "bad room id" });
       }
+
+      // ---- AUTH (Phase 0): same dual-auth as /token --------------------------
+      // (a) a verified Supabase user JWT (coach or native athlete), OR
+      // (b) a valid room ticket scoped to THIS room (no-signup browser athlete).
+      // No valid credential -> 401. A bad/expired JWT is a hard 401 (the caller
+      // clearly meant to authenticate as a user; do not fall through to ticket).
+      const hasAuthHeader = (req.headers.authorization || "").startsWith("Bearer ");
+      if (hasAuthHeader) {
+        const authd = await requireSupabaseUser(req);
+        if (authd.error) {
+          return res.status(authd.status).json({ error: authd.error });
+        }
+      } else {
+        // express.raw consumed the body, so the ticket rides in a header (the
+        // browser uploader sends X-Room-Ticket) or a query param fallback.
+        const ticket =
+          req.headers["x-room-ticket"] || req.query.ticket || "";
+        if (!verifyRoomTicket(String(ticket), room)) {
+          return res
+            .status(401)
+            .json({ error: "authentication required (sign in or valid room ticket)" });
+        }
+      }
+
       const body = req.body;
       if (!body || !body.length) {
         return res.status(400).json({ error: "empty clip" });
       }
-      const contentType = String(req.headers["content-type"] || "video/webm");
-      const ext = contentType.includes("mp4") ? "mp4" : "webm";
+
+      // ---- MAGIC-BYTE validation (Phase 0): trust the bytes, not the header --
+      const kind = sniffVideoMagic(body);
+      if (!kind) {
+        return res
+          .status(415)
+          .json({ error: "unsupported media: not a webm/mp4 video" });
+      }
+      const ext = kind; // "webm" | "mp4", derived from the real bytes
+      const contentType = kind === "mp4" ? "video/mp4" : "video/webm";
       const objectPath = `${room}/${Date.now()}-${Math.random()
         .toString(36)
         .slice(2, 8)}.${ext}`;
 
+      // ---- PRIVATE bucket write (Phase 0): CLIPS_BUCKET, not public "clips" --
       const up = await fetch(
-        `${SUPABASE_URL}/storage/v1/object/clips/${objectPath}`,
+        `${SUPABASE_URL}/storage/v1/object/${CLIPS_BUCKET}/${objectPath}`,
         {
           method: "POST",
           headers: {
@@ -484,9 +599,12 @@ app.post(
         return res.status(502).json({ error: "storage upload failed" });
       }
 
-      res.json({
-        url: `${SUPABASE_URL}/storage/v1/object/public/clips/${objectPath}`,
-      });
+      // ---- SIGNED URL (Phase 0): no world-readable /object/public/ URL -------
+      const signedUrl = await signClipUrl(objectPath);
+      if (!signedUrl) {
+        return res.status(502).json({ error: "could not sign clip url" });
+      }
+      res.json({ url: signedUrl });
     } catch (err) {
       console.error("[token-server] clip upload error:", err);
       res.status(500).json({ error: "clip upload failed" });
@@ -768,7 +886,20 @@ app.post("/token", tokenLimiter, async (req, res) => {
   }
 });
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`[token-server] listening on 0.0.0.0:${PORT}`);
-  console.log(`[token-server] LiveKit URL: ${LIVEKIT_URL}`);
-});
+// Only bind the port when run directly (node index.js). When required by a test
+// (require.main !== module) we export the pure helpers for unit testing and skip
+// listen(), so tests never open a socket or need live LiveKit/Supabase creds.
+if (require.main === module) {
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`[token-server] listening on 0.0.0.0:${PORT}`);
+    console.log(`[token-server] LiveKit URL: ${LIVEKIT_URL}`);
+  });
+}
+
+module.exports = {
+  sniffVideoMagic,
+  mintRoomTicket,
+  verifyRoomTicket,
+  isValidRoomId,
+  signClipUrl,
+};

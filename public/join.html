@@ -1172,9 +1172,15 @@
       return;
     }
     try {
+      // Phase 0 security: clips upload is now authenticated. A no-signup browser
+      // athlete proves room membership with the same room ticket it used to
+      // reach /token (sent as X-Room-Ticket; the raw body is the clip bytes, so
+      // the ticket can't ride in the JSON body). Without it the server 401s.
+      var clipHeaders = { "Content-Type": blob.type || "video/webm" };
+      if (roomTicket) clipHeaders["X-Room-Ticket"] = roomTicket;
       var resp = await fetch(tokenServerOrigin() + "/clips/" + roomId, {
         method: "POST",
-        headers: { "Content-Type": blob.type || "video/webm" },
+        headers: clipHeaders,
         body: blob
       });
       if (!resp.ok) {
