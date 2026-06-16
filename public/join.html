@@ -359,14 +359,30 @@
     document.getElementById("roomLabel").textContent = roomId;
   }
 
-  // ---- persistent guest identity ----
-  var GUEST_KEY = "sideline_guest_id";
-  var guestId = "";
-  try { guestId = localStorage.getItem(GUEST_KEY) || ""; } catch (e) {}
-  if (!guestId) {
-    guestId = "guest-" + Math.random().toString(36).slice(2, 10);
-    try { localStorage.setItem(GUEST_KEY, guestId); } catch (e) {}
-  }
+  // ---- room ticket (Phase 0 security) ----
+  // A no-signup browser athlete authenticates to /token with a server-signed,
+  // room-scoped, short-lived room ticket the coach embedded in the link's URL
+  // fragment (#t=...). Fragments stay client-side (never sent to the server in
+  // the GET), so the ticket isn't logged. The server derives our identity; we
+  // no longer pick our own guest id.
+  var roomTicket = "";
+  try {
+    var h = window.location.hash || "";
+    var m = h.match(/[#&]t=([^&]+)/);
+    if (m) roomTicket = decodeURIComponent(m[1]);
+    // Persist so a manual refresh (which can drop the fragment) still works
+    // within the ticket's lifetime; scoped per room.
+    var TICKET_KEY = "coachtime_ticket_" + roomId;
+    if (roomTicket) {
+      try { sessionStorage.setItem(TICKET_KEY, roomTicket); } catch (e) {}
+    } else {
+      try { roomTicket = sessionStorage.getItem(TICKET_KEY) || ""; } catch (e) {}
+    }
+    // Drop the ticket from the address bar so it isn't shoulder-surfed or copied.
+    if (m && window.history && window.history.replaceState) {
+      try { window.history.replaceState(null, "", window.location.pathname); } catch (e) {}
+    }
+  } catch (e) {}
 
   // ---- elements ----
   var lobby = document.getElementById("lobby");
@@ -447,14 +463,20 @@
     joinBtn.textContent = "Connecting…";
 
     try {
+      // Send the room ticket (Phase 0). The server derives identity from it; we
+      // never send our own identity (that was the impersonation hole).
       var resp = await fetch(tokenServerOrigin() + "/token", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ room: roomId, identity: guestId, name: name })
+        body: JSON.stringify({ room: roomId, name: name, ticket: roomTicket })
       });
       if (!resp.ok) {
         var detail = "";
         try { detail = (await resp.json()).error || ""; } catch (e) {}
+        // 401 here almost always means the link's ticket is missing or expired.
+        if (resp.status === 401) {
+          throw new Error("This session link has expired or is missing its pass. Ask your coach to send a fresh link.");
+        }
         throw new Error(detail || ("Server returned " + resp.status));
       }
       var data = await resp.json();

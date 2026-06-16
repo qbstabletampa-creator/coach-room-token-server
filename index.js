@@ -3,6 +3,7 @@
 // The secret lives ONLY in this server's env (Render). Never ship it in the app bundle.
 
 const path = require("path");
+const crypto = require("crypto");
 const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
@@ -14,6 +15,21 @@ const PORT = process.env.PORT || 3130;
 const LIVEKIT_URL = process.env.LIVEKIT_URL;
 const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY;
 const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET;
+
+// Supabase (shared by /claim, /clips, and the Phase 0 /token auth helper).
+// Declared up here so requireSupabaseUser() in the helpers section can read them.
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
+
+// Phase 0 security: server-signed, room-scoped, short-lived "room ticket" so a
+// no-signup browser athlete can still join. HMAC-SHA256 with this secret. If it
+// is unset the server still boots (LiveKit-only deploys), but ticket mint/verify
+// are disabled and only Supabase-JWT callers can reach /token — fail closed.
+const ROOM_TICKET_SECRET = process.env.ROOM_TICKET_SECRET;
+// How long a minted room ticket stays valid. 30 min: a coach shares a browser
+// link, the athlete opens it within the half hour. Short enough that a leaked
+// link dies fast, long enough to absorb "open it in a few minutes".
+const ROOM_TICKET_TTL_MS = 30 * 60 * 1000;
 
 if (!LIVEKIT_API_KEY || !LIVEKIT_API_SECRET || !LIVEKIT_URL) {
   console.error(
@@ -74,8 +90,39 @@ app.use(
   }),
 );
 
-app.use(cors()); // open CORS for now — the iOS app + the browser join page both need it.
-                 // Full Supabase-JWT auth on /token is a later phase (see README).
+// CORS is no longer wildcard (Phase 0 security). The browser join page is
+// same-origin (served by this server), so it never needs cross-origin CORS.
+// The native app is NOT a browser origin (no Origin header), so it is unaffected
+// by CORS entirely — it always reaches /token regardless of this allowlist.
+// ALLOWED_ORIGINS is an optional comma-separated env override; the default is the
+// known Render token-server origin(s). A request with no Origin header (native
+// app, curl, server-to-server) is allowed through; only browser cross-origin
+// requests from an unlisted origin are rejected.
+const DEFAULT_ALLOWED_ORIGINS = [
+  "https://coach-room-token-server.onrender.com",
+];
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+const CORS_ALLOWLIST = ALLOWED_ORIGINS.length
+  ? ALLOWED_ORIGINS
+  : DEFAULT_ALLOWED_ORIGINS;
+
+app.use(
+  cors({
+    origin(origin, cb) {
+      // No Origin header → not a browser cross-origin call (native app, curl,
+      // same-origin navigation). Allow it; auth is enforced per-route, not by CORS.
+      if (!origin) return cb(null, true);
+      // Allowed origin → reflect it (sets Access-Control-Allow-Origin).
+      // Disallowed origin → do NOT throw (that would 500 the request). Instead
+      // resolve false: no ACAO header is sent, so the browser blocks the
+      // cross-origin read on its own, which is the real enforcement.
+      return cb(null, CORS_ALLOWLIST.includes(origin));
+    },
+  }),
+);
 app.use(express.json());
 
 // ---- Analyze v1: same-origin CORS proxy --------------------------------------
@@ -187,6 +234,92 @@ function escapeJsString(str) {
     .replace(/\r/g, "\\r");
 }
 
+// ---- Phase 0 auth helpers --------------------------------------------------
+
+// Verify a Supabase user JWT from the Authorization: Bearer header. This reuses
+// the EXACT pattern already proven on POST /claim (auth/v1/user check with the
+// service key) so /token and /claim share one auth primitive.
+//
+// Returns { user } on success, or { error, status } on failure (401 for a
+// missing/invalid token, 503 if Supabase is not configured). It never throws on
+// a bad token — the caller decides what to do (e.g. fall through to a room
+// ticket) — but a thrown network error propagates to the route's try/catch.
+async function requireSupabaseUser(req) {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+    return { error: "auth not configured", status: 503 };
+  }
+  const auth = req.headers.authorization || "";
+  const jwt = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  if (!jwt) return { error: "sign in required", status: 401 };
+
+  const uResp = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+    headers: { apikey: SUPABASE_SERVICE_KEY, authorization: `Bearer ${jwt}` },
+  });
+  if (!uResp.ok) return { error: "invalid session", status: 401 };
+  const user = await uResp.json();
+  if (!user?.id) return { error: "invalid session", status: 401 };
+  return { user };
+}
+
+// ---- Room ticket (server-signed, room-scoped, short-lived) -----------------
+// A room ticket lets a no-signup browser athlete reach /token without a Supabase
+// account. It is NOT a LiveKit token and carries NO LiveKit grant — it only
+// proves "the bearer was authorized by a logged-in user to join THIS room,
+// recently". /token verifies it and then mints a properly role-scoped LiveKit
+// token server-side. Format: base64url(payload).base64url(hmacSHA256(payload)).
+// Payload is JSON: { room, exp }. The signature binds room + exp so neither can
+// be tampered with. No secret in the ticket, no client-controlled grant.
+
+function b64url(buf) {
+  return Buffer.from(buf).toString("base64")
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function b64urlToBuf(str) {
+  const pad = str.length % 4 === 0 ? "" : "=".repeat(4 - (str.length % 4));
+  return Buffer.from(str.replace(/-/g, "+").replace(/_/g, "/") + pad, "base64");
+}
+
+function mintRoomTicket(room) {
+  if (!ROOM_TICKET_SECRET) return null;
+  const payload = JSON.stringify({ room: String(room), exp: Date.now() + ROOM_TICKET_TTL_MS });
+  const p = b64url(payload);
+  const sig = crypto.createHmac("sha256", ROOM_TICKET_SECRET).update(p).digest();
+  return `${p}.${b64url(sig)}`;
+}
+
+// Returns the room id the ticket is valid for, or null if invalid/expired/forged.
+function verifyRoomTicket(ticket, room) {
+  if (!ROOM_TICKET_SECRET || typeof ticket !== "string" || !ticket.includes(".")) {
+    return null;
+  }
+  const dot = ticket.indexOf(".");
+  const p = ticket.slice(0, dot);
+  const sigPart = ticket.slice(dot + 1);
+  const expected = crypto.createHmac("sha256", ROOM_TICKET_SECRET).update(p).digest();
+  let provided;
+  try {
+    provided = b64urlToBuf(sigPart);
+  } catch {
+    return null;
+  }
+  // Constant-time compare; lengths must match or timingSafeEqual throws.
+  if (provided.length !== expected.length || !crypto.timingSafeEqual(provided, expected)) {
+    return null;
+  }
+  let payload;
+  try {
+    payload = JSON.parse(b64urlToBuf(p).toString("utf8"));
+  } catch {
+    return null;
+  }
+  if (!payload || typeof payload.room !== "string" || typeof payload.exp !== "number") {
+    return null;
+  }
+  if (payload.exp <= Date.now()) return null; // expired
+  if (String(room) !== payload.room) return null; // room-scoped: ticket is for one room only
+  return payload.room;
+}
+
 // ---- routes ----------------------------------------------------------------
 
 app.get("/health", (_req, res) => {
@@ -248,15 +381,21 @@ app.get("/join/:id", (req, res) => {
     <div class="dot" aria-hidden="true"></div>
     <h1>Opening CoachTime…</h1>
     <p>Launching the app for room <span class="room">${idHtml}</span>.<br/>No app? You'll join in the browser.</p>
-    <a class="fallback" href="/web/${idHtml}">Join in browser</a>
+    <a class="fallback" id="browserLink" href="/web/${idHtml}">Join in browser</a>
   </div>
 <script>
   (function () {
     var roomId = '${idJs}';
+    // The room ticket (Phase 0) rides in the URL fragment (#t=...). Fragments are
+    // never sent to the server, so the ticket stays out of server logs. Carry it
+    // through to /web so the browser join page can read it and reach /token.
+    var frag = window.location.hash || '';
+    // Keep the manual "Join in browser" link carrying the ticket too.
+    try { document.getElementById('browserLink').href = '/web/' + roomId + frag; } catch (e) {}
     // Try the native app first.
     try { window.location = 'coachroomapp://room/' + roomId; } catch (e) {}
     // Fall back to the browser room if the app didn't take over.
-    setTimeout(function () { window.location = '/web/' + roomId; }, 1200);
+    setTimeout(function () { window.location = '/web/' + roomId + frag; }, 1200);
   })();
 </script>
 </body>
@@ -293,8 +432,8 @@ h1{font-size:20px;margin:0 0 8px}p{color:#B8B6B0;font-size:14px;margin:0}</style
 // ephemeral). Requires SUPABASE_URL + SUPABASE_SERVICE_KEY in env; without
 // them the endpoint answers 503 so the call can toast honestly.
 
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
+// SUPABASE_URL / SUPABASE_SERVICE_KEY are declared once near the top of the file
+// (the Phase 0 /token auth helper needs them before this point).
 
 const clipLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -481,6 +620,47 @@ app.post("/claim/:token", claimLimiter, async (req, res) => {
   }
 });
 
+// ---- room ticket mint ------------------------------------------------------
+// AUTHENTICATED. Only a logged-in Supabase user (the coach) can mint a room
+// ticket. The coach app calls this when it builds a shareable browser link, so
+// the link can carry a ticket a no-signup athlete uses to reach /token. The
+// ticket is room-scoped and short-lived; it grants NOTHING by itself.
+const ticketLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many ticket requests, slow down." },
+});
+
+// POST /room-ticket  { room }  (Authorization: Bearer <supabase user JWT>)
+//   -> { ticket, expiresInMs }
+app.post("/room-ticket", ticketLimiter, async (req, res) => {
+  try {
+    if (!ROOM_TICKET_SECRET) {
+      return res.status(503).json({ error: "room tickets not configured" });
+    }
+    const { room } = req.body || {};
+    if (!room || !isValidRoomId(String(room))) {
+      return res.status(400).json({ error: "bad room id" });
+    }
+    // Minting requires auth: a stranger cannot forge a ticket without a real
+    // Supabase session. (Network errors bubble to the catch below.)
+    const authd = await requireSupabaseUser(req);
+    if (authd.error) {
+      return res.status(authd.status).json({ error: authd.error });
+    }
+    const ticket = mintRoomTicket(String(room));
+    if (!ticket) {
+      return res.status(503).json({ error: "room tickets not configured" });
+    }
+    res.json({ ticket, expiresInMs: ROOM_TICKET_TTL_MS });
+  } catch (err) {
+    console.error("[token-server] room-ticket error:", err);
+    res.status(500).json({ error: "failed to mint room ticket" });
+  }
+});
+
 // ---- token mint ------------------------------------------------------------
 
 // Rate limit: 30 requests / minute / IP. Token mints are cheap and signed
@@ -496,29 +676,86 @@ const tokenLimiter = rateLimit({
 });
 
 // POST /token  { room, identity, name } -> { token, url }
+// POST /token  { room, name?, ticket? }  -> { token, url }
+//
+// Phase 0 auth (this is the impersonation fix). To mint a LiveKit token the
+// caller MUST present EITHER:
+//   (a) a valid Supabase user JWT in Authorization: Bearer — coach (native app)
+//       or native athlete (anonymous Supabase session created on /claim), OR
+//   (b) a valid room ticket for THIS room — no-signup browser athlete.
+// No JWT and no valid ticket -> 401. Identity and role are derived SERVER-SIDE
+// from whichever credential checked out; the client-supplied `identity` is
+// IGNORED entirely (that was the impersonation hole — a stranger could type
+// "coach-<uid>"). `name` is kept only as a display label.
 app.post("/token", tokenLimiter, async (req, res) => {
   try {
-    const { room, identity, name } = req.body || {};
+    const { room, name, ticket } = req.body || {};
 
-    if (!room || !identity) {
-      return res.status(400).json({ error: "room and identity are required" });
+    if (!room) {
+      return res.status(400).json({ error: "room is required" });
     }
     // Same validation every other route applies — never pass an arbitrary
     // string into a LiveKit grant (Engine finding N2, 2026-06-12).
     if (!isValidRoomId(String(room))) {
       return res.status(400).json({ error: "bad room id" });
     }
+    const roomStr = String(room);
+
+    // Derive identity + role SERVER-SIDE. Never trust req.body.identity.
+    let identity = null;
+    let role = "athlete"; // browser/native athlete by default; coach is proven by JWT metadata
+
+    // Path (a): Supabase user JWT, if an Authorization header is present.
+    const hasAuthHeader = (req.headers.authorization || "").startsWith("Bearer ");
+    if (hasAuthHeader) {
+      const authd = await requireSupabaseUser(req);
+      if (authd.error) {
+        // A bad/expired JWT is a hard 401 — do not silently fall through to a
+        // ticket, the caller clearly meant to authenticate as a user.
+        return res.status(authd.status).json({ error: authd.error });
+      }
+      const user = authd.user;
+      // Role from the verified user's metadata. A coach is whoever the app
+      // marks as such (user_metadata.role === "coach"); everyone else is an
+      // athlete. This comes from the trusted /auth/v1/user response, NOT the
+      // request body, so it cannot be spoofed by the client.
+      const claimedRole =
+        user.user_metadata?.role || user.app_metadata?.role || null;
+      role = claimedRole === "coach" ? "coach" : "athlete";
+      identity = `${role}-${user.id}`;
+    } else {
+      // Path (b): room ticket for a no-signup browser athlete.
+      const ticketRoom = verifyRoomTicket(ticket, roomStr);
+      if (!ticketRoom) {
+        return res
+          .status(401)
+          .json({ error: "authentication required (sign in or valid room ticket)" });
+      }
+      // Server-generated guest identity, scoped to the ticket's room. The
+      // browser cannot pick its own identity.
+      role = "athlete";
+      identity = `guest-${crypto.randomBytes(5).toString("hex")}`;
+    }
 
     const at = new AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET, {
-      identity: String(identity),
-      name: name ? String(name) : undefined,
+      identity,
+      name: name ? String(name).slice(0, 80) : undefined,
+      // Short TTL: the token is only needed at the initial signal handshake, not
+      // for the call duration, so 15 min does not drop anyone mid-call but a
+      // leaked token dies fast.
+      ttl: "15m",
     });
 
+    // Two-way video preserved for BOTH roles: coach and athlete each publish
+    // their own camera/mic and subscribe to the other. Role-scoping here means
+    // identity/role are server-derived and the room is authorized — it does NOT
+    // strip publish from athletes. Nobody gets roomAdmin/roomCreate.
     at.addGrant({
       roomJoin: true,
-      room: String(room),
+      room: roomStr,
       canPublish: true,
       canSubscribe: true,
+      canPublishData: true,
     });
 
     // toJwt() is async in livekit-server-sdk v2.

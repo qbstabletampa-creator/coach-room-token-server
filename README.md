@@ -29,6 +29,19 @@ LIVEKIT_URL=wss://...livekit.cloud
 LIVEKIT_API_KEY=...
 LIVEKIT_API_SECRET=...
 PORT=3130
+
+# Supabase (already used by /claim; now also used to auth /token).
+SUPABASE_URL=https://<project>.supabase.co
+SUPABASE_SERVICE_KEY=...
+
+# Phase 0 security: HMAC secret used to sign room tickets (no-signup browser
+# athlete join). REQUIRED for the browser join path. Generate a long random
+# value, e.g. `openssl rand -hex 32`. If unset, browser tickets are disabled and
+# only Supabase-JWT callers can mint a token (fail closed).
+ROOM_TICKET_SECRET=...
+
+# Optional: comma-separated CORS allowlist. Defaults to the Render origin.
+# ALLOWED_ORIGINS=https://coach-room-token-server.onrender.com
 ```
 
 The secret lives ONLY in Render env vars in production. Never commit it.
@@ -38,8 +51,9 @@ The secret lives ONLY in Render env vars in production. Never commit it.
 | Method | Route | Purpose |
 |--------|-------|---------|
 | GET  | `/health` | `{ "ok": true }` |
-| POST | `/token` | body `{ room, identity, name }` -> `{ token, url }`. Rate limited (see below). |
-| GET  | `/join/:id` | HTML interstitial: tries the app deep link `coachroomapp://room/<id>`, falls back to `/web/<id>` after 1.2s. The everyone-can-open invite link. |
+| POST | `/token` | body `{ room, name?, ticket? }` + optional `Authorization: Bearer <supabase JWT>` -> `{ token, url }`. **Authed** (JWT or room ticket). Rate limited. |
+| POST | `/room-ticket` | body `{ room }` + `Authorization: Bearer <supabase JWT>` -> `{ ticket, expiresInMs }`. **Auth required** (only a logged-in coach can mint). |
+| GET  | `/join/:id` | HTML interstitial: tries the app deep link `coachroomapp://room/<id>`, falls back to `/web/<id>` after 1.2s. Carries the room-ticket URL fragment through. The everyone-can-open invite link. |
 | GET  | `/web/:id` | Browser call page (`public/join.html`) — full LiveKit web room. |
 
 `:id` is validated to `[A-Za-z0-9-]{1,64}`. Anything else returns a 400
@@ -81,12 +95,28 @@ error display, and mobile Safari (`playsinline`, portrait).
   Render's TLS proxy.
 - `app.use(express.static("public"))` serves the join page assets.
 
-## Auth (later phase)
+## Auth (Phase 0 security — implemented)
 
-CORS is intentionally **open** right now — the iOS app and the browser join page both
-hit `/token` from different origins. Full Supabase-JWT auth on `/token` (verify the
-caller is a real, allowed user before minting) is a planned later phase. Until then,
-the rate limit is the only abuse control on token minting.
+`POST /token` is no longer anonymous. To mint a LiveKit token the caller must present
+EITHER:
+
+1. **A valid Supabase user JWT** (`Authorization: Bearer ...`) — the coach (native app)
+   or a native athlete (anonymous Supabase session created during `/claim`). The server
+   verifies it against `auth/v1/user`, then derives the identity SERVER-SIDE
+   (`coach-<uid>` or `athlete-<uid>`) and the role from the user's metadata. **The
+   client-supplied `identity` is ignored** — that was the impersonation hole.
+2. **A valid room ticket** (`{ ticket }` in the body) — a no-signup browser athlete. The
+   coach mints it via `POST /room-ticket` (auth required) and the link carries it in the
+   URL fragment. The ticket is HMAC-signed (`ROOM_TICKET_SECRET`), room-scoped, and
+   short-lived (30 min). The server issues a server-generated `guest-<random>` identity.
+
+No JWT and no valid ticket → **401**. Tokens carry a **15-minute TTL** (only needed at
+the initial signal handshake) and a role-scoped grant: both coach and athlete get
+`canPublish` + `canSubscribe` (two-way video preserved); nobody gets `roomAdmin`/`roomCreate`.
+
+**CORS** is locked to an allowlist (`ALLOWED_ORIGINS`, default the Render origin). The
+browser join page is same-origin so it needs no cross-origin CORS; the native app is not
+a browser origin and is unaffected.
 
 ## Local phone testing (Tailscale)
 
