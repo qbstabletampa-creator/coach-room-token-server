@@ -172,11 +172,32 @@ app.get("/analyze/proxy", async (req, res) => {
     const fwdHeaders = {};
     if (req.headers.range) fwdHeaders.range = req.headers.range;
 
+    // SSRF redirect guard (Phase 0): redirect: "manual" so fetch does NOT chase
+    // a 3xx on its own. The exact-host allowlist above only validates the FIRST
+    // URL; without this, a trusted Supabase response that 3xx-redirects (or a
+    // host that resolves there) could bounce the proxy to an internal/arbitrary
+    // address (e.g. 169.254.169.254 cloud metadata), defeating the allowlist.
+    // Supabase public/signed object reads return 200/206 directly and never need
+    // a redirect, so we reject any 3xx outright instead of following it.
     const upstream = await fetch(target.toString(), {
       method: "GET",
       headers: fwdHeaders,
-      redirect: "follow",
+      redirect: "manual",
     });
+
+    // Reject any redirect. fetch with redirect:"manual" surfaces 3xx as a real
+    // status (or an opaqueredirect type); either way we refuse to follow it.
+    if (
+      (upstream.status >= 300 && upstream.status < 400) ||
+      upstream.type === "opaqueredirect"
+    ) {
+      console.warn(
+        "[token-server] analyze proxy refused redirect:",
+        upstream.status,
+        upstream.headers.get("location") || "(opaque)",
+      );
+      return res.status(502).json({ error: "redirect not allowed" });
+    }
 
     // Mirror status (200 or 206 for partial content; 4xx/5xx pass through too).
     res.status(upstream.status);
@@ -393,6 +414,24 @@ async function signClipUrl(objectPath) {
   return `${SUPABASE_URL}/storage/v1${rel}`;
 }
 
+// Resolve the client's clip reference into a SAFE object path inside :room.
+// Accepts either an object path ("<room>/<file>") or a bare filename ("<file>"),
+// and always returns "<room>/<basename>" — the room is taken from the route, not
+// the input, so a caller authed for room A can never sign a clip in room B, and
+// "../" path traversal is stripped (only [A-Za-z0-9._-] filenames are allowed).
+// Returns null if the filename is unusable. This is the authorization boundary
+// for /clips/sign: the signed object is pinned to the room the caller proved.
+const CLIP_FILENAME_RE = /^[A-Za-z0-9._-]{1,128}$/;
+function resolveClipObjectPath(room, ref) {
+  if (typeof ref !== "string" || !ref) return null;
+  // Take the last path segment (handles both "<room>/<file>" and "<file>", and
+  // neutralizes any "a/b/../c" traversal — the basename is all we keep).
+  const base = ref.split("/").filter(Boolean).pop() || "";
+  if (!CLIP_FILENAME_RE.test(base)) return null;
+  if (base === "." || base === "..") return null;
+  return `${room}/${base}`;
+}
+
 // ---- routes ----------------------------------------------------------------
 
 app.get("/health", (_req, res) => {
@@ -523,6 +562,76 @@ const clipLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "Too many clip uploads, slow down." },
+});
+
+// ---- on-demand clip re-sign (Phase 0 security) ------------------------------
+// POST /clips/sign  { room, path | filename }  -> { url }
+// Signed clip URLs are short-lived (CLIP_SIGN_TTL_S). Persisting a long-lived
+// URL would either leak (long TTL) or go dark after the TTL (short TTL). Instead
+// the app stores only the object PATH and asks here for a FRESH signed URL at
+// play time, so clips never expire on the user and the public bucket can be
+// fully retired (a minor's footage is never world-readable).
+//
+// Auth: EXACTLY the same dual-auth as /clips/:room and /token:
+//   (a) a verified Supabase user JWT (coach / native athlete), OR
+//   (b) a valid room ticket scoped to THIS room (no-signup browser athlete).
+// No valid credential -> 401. The object is pinned to :room server-side, so a
+// caller authed for one room cannot sign another room's clip.
+//
+// MUST be registered BEFORE "/clips/:room" so Express matches "/clips/sign" here
+// and does not treat "sign" as a :room param (route order matters in Express).
+const clipSignLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60, // playback re-signs are read-only and cheap; a review session may
+  // open several clips in a minute, so this is roomier than the upload limit.
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many sign requests, slow down." },
+});
+
+app.post("/clips/sign", clipSignLimiter, async (req, res) => {
+  try {
+    if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+      return res.status(503).json({ error: "clip storage not configured" });
+    }
+    const { room, path: clipPath, filename } = req.body || {};
+    if (!room || !isValidRoomId(String(room))) {
+      return res.status(400).json({ error: "bad room id" });
+    }
+    const roomStr = String(room);
+
+    // ---- AUTH: same dual-auth as /clips/:room and /token -------------------
+    const hasAuthHeader = (req.headers.authorization || "").startsWith("Bearer ");
+    if (hasAuthHeader) {
+      const authd = await requireSupabaseUser(req);
+      if (authd.error) {
+        return res.status(authd.status).json({ error: authd.error });
+      }
+    } else {
+      const ticket = req.headers["x-room-ticket"] || req.body.ticket || "";
+      if (!verifyRoomTicket(String(ticket), roomStr)) {
+        return res
+          .status(401)
+          .json({ error: "authentication required (sign in or valid room ticket)" });
+      }
+    }
+
+    // Resolve to a safe object path pinned to :room (strips traversal, ignores
+    // any room embedded in the input).
+    const objectPath = resolveClipObjectPath(roomStr, clipPath || filename);
+    if (!objectPath) {
+      return res.status(400).json({ error: "bad clip reference" });
+    }
+
+    const signedUrl = await signClipUrl(objectPath);
+    if (!signedUrl) {
+      return res.status(502).json({ error: "could not sign clip url" });
+    }
+    res.json({ url: signedUrl });
+  } catch (err) {
+    console.error("[token-server] clip sign error:", err);
+    res.status(500).json({ error: "clip sign failed" });
+  }
 });
 
 app.post(
@@ -707,31 +816,62 @@ app.post("/claim/:token", claimLimiter, async (req, res) => {
     const user = await uResp.json();
     if (!user?.id) return res.status(401).json({ error: "invalid session" });
 
+    // lookupClaim is ONLY for the friendly 404 "claim not found" message. The
+    // authority for single-use is the filtered UPDATE below, never this read.
     const claim = await lookupClaim(token);
     if (!claim) return res.status(404).json({ error: "claim not found" });
-    if (claim.claimed_at) return res.status(409).json({ error: "already claimed" });
-    if (new Date(claim.expires_at).getTime() <= Date.now()) {
-      return res.status(410).json({ error: "claim expired" });
-    }
 
+    // ---- ATOMIC consume (Phase 0): no check-then-act window ------------------
+    // The precondition (unclaimed AND not expired) lives in the UPDATE filter,
+    // so two concurrent requests cannot both win: PostgREST applies the filter
+    // row-by-row, the first PATCH flips claimed_at, the second matches 0 rows.
+    // `Prefer: return=representation` returns the rows actually updated, so an
+    // empty array means "someone already claimed or it expired" -> 409. There
+    // is no separate read-then-write, so the classic race is gone.
+    const nowIso = new Date().toISOString();
     const svcHeaders = {
       apikey: SUPABASE_SERVICE_KEY,
       authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
       "content-type": "application/json",
-      prefer: "return=minimal",
     };
+    const consumeResp = await fetch(
+      `${SUPABASE_URL}/rest/v1/athlete_claims` +
+        `?token=eq.${token}` +
+        `&claimed_at=is.null` +
+        `&expires_at=gt.${encodeURIComponent(nowIso)}`,
+      {
+        method: "PATCH",
+        headers: { ...svcHeaders, prefer: "return=representation" },
+        body: JSON.stringify({ claimed_by: user.id, claimed_at: nowIso }),
+      },
+    );
+    if (!consumeResp.ok) {
+      const detail = await consumeResp.text().catch(() => "");
+      console.error("[token-server] claim consume failed:", consumeResp.status, detail);
+      return res.status(502).json({ error: "claim failed" });
+    }
+    const consumed = await consumeResp.json().catch(() => []);
+    // 0 rows updated -> the claim was already taken or is expired. Either way the
+    // token is spent/unusable: 409 already-claimed (single-use is enforced here).
+    if (!Array.isArray(consumed) || consumed.length === 0) {
+      return res.status(409).json({ error: "already claimed" });
+    }
+    const consumedRow = consumed[0];
+
+    // Token is now consumed atomically. Bind the athlete card. If THIS fails the
+    // token is already spent (the safe direction: no double-bind, no second
+    // request can re-consume), so we surface 502 and the user re-requests a link.
     const r1 = await fetch(
-      `${SUPABASE_URL}/rest/v1/athletes?id=eq.${claim.athlete_id}`,
-      { method: "PATCH", headers: svcHeaders, body: JSON.stringify({ user_id: user.id }) },
+      `${SUPABASE_URL}/rest/v1/athletes?id=eq.${consumedRow.athlete_id}`,
+      {
+        method: "PATCH",
+        headers: { ...svcHeaders, prefer: "return=minimal" },
+        body: JSON.stringify({ user_id: user.id }),
+      },
     );
     if (!r1.ok) return res.status(502).json({ error: "claim failed" });
-    await fetch(`${SUPABASE_URL}/rest/v1/athlete_claims?token=eq.${token}`, {
-      method: "PATCH",
-      headers: svcHeaders,
-      body: JSON.stringify({ claimed_by: user.id, claimed_at: new Date().toISOString() }),
-    });
 
-    res.json({ ok: true, athleteId: claim.athlete_id });
+    res.json({ ok: true, athleteId: consumedRow.athlete_id });
   } catch (err) {
     console.error("[token-server] claim error:", err);
     res.status(500).json({ error: "claim failed" });
@@ -897,9 +1037,11 @@ if (require.main === module) {
 }
 
 module.exports = {
+  app, // exported so tests can drive routes over an ephemeral port (no live creds)
   sniffVideoMagic,
   mintRoomTicket,
   verifyRoomTicket,
   isValidRoomId,
   signClipUrl,
+  resolveClipObjectPath,
 };

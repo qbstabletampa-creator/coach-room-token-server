@@ -529,6 +529,31 @@ async function runPipeline({ gen, fileName, fileSize }) {
   await processVideo();
   if (gen !== fileGeneration) return;
 
+  // ---- No-person / wrong-angle guard (Phase 0) ----------------------------
+  // processVideo pushes { landmarks: null } for every frame where MediaPipe
+  // found no pose. With zero or sparse detections the downstream math runs on
+  // nulls and produces a blank all-dashes F-grade report card, which lies to
+  // the user. Count usable frames; if the clip has no athlete (or far too few
+  // detected frames to grade), route to the existing ERROR screen instead of
+  // completing into a misleading card. Threshold: need landmarks in at least
+  // max(3, 10% of frames) — real QB clips track the athlete the whole rep, so
+  // this never trips on a valid clip but always catches a wall/empty field.
+  const landmarkFrames = poseData.filter(
+    (f) => f.landmarks && f.landmarks.length,
+  ).length;
+  const minLandmarkFrames = Math.max(3, Math.floor(totalFrames * 0.1));
+  if (landmarkFrames === 0 || landmarkFrames < minLandmarkFrames) {
+    if (gen !== fileGeneration) return;
+    console.warn(
+      `[analyze] no/sparse athlete detected: ${landmarkFrames}/${totalFrames} frames had landmarks (min ${minLandmarkFrames})`,
+    );
+    setProcessingState(ProcessingState.ERROR);
+    showError(
+      "No athlete detected in this clip. Use side-angle footage with the thrower fully in frame and well lit, then try again.",
+    );
+    return;
+  }
+
   setProcessingState(ProcessingState.COMPLETE);
 
   computeAllAngles();
