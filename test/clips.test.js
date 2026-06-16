@@ -120,9 +120,27 @@ test("a forged/garbage ticket is rejected", () => {
 });
 
 test("a tampered signature is rejected", () => {
+  const crypto = require("node:crypto");
   const t = mintRoomTicket("room-abc");
-  const tampered = t.slice(0, -2) + (t.endsWith("a") ? "b" : "a") + t.slice(-1);
-  assert.strictEqual(verifyRoomTicket(tampered, "room-abc"), null);
+  const p = t.slice(0, t.indexOf("."));
+
+  // Forge: sign the real payload with the WRONG secret. Deterministic and
+  // genuinely invalid, so it MUST be rejected. (The previous char-swap tamper
+  // was non-deterministic: a no-op swap or base64 trailing-bit equivalence
+  // could leave the signature cryptographically unchanged and still valid.)
+  const wrongSig = crypto
+    .createHmac("sha256", "attacker-does-not-know-the-secret")
+    .update(p)
+    .digest("base64url");
+  assert.strictEqual(verifyRoomTicket(`${p}.${wrongSig}`, "room-abc"), null);
+
+  // Also flip a real signature byte and re-encode -> must be rejected.
+  const sb = Buffer.from(t.slice(t.indexOf(".") + 1), "base64url");
+  sb[0] ^= 0xff;
+  assert.strictEqual(
+    verifyRoomTicket(`${p}.${sb.toString("base64url")}`, "room-abc"),
+    null
+  );
 });
 
 // ---- signed URL helper (Criterion 2) ---------------------------------------
