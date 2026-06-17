@@ -336,6 +336,7 @@
       <button class="ctrl" id="scriptBtn" aria-label="Practice script" title="Script"><span class="unread" aria-hidden="true"></span></button>
       <button class="ctrl" id="micBtn" aria-label="Toggle microphone" title="Mute"></button>
       <button class="ctrl" id="camBtn" aria-label="Toggle camera" title="Camera"></button>
+      <button class="ctrl" id="flipBtn" aria-label="Flip camera" title="Flip camera"></button>
       <button class="ctrl leave" id="leaveBtn" aria-label="Leave session" title="Leave"></button>
     </div>
   </div>
@@ -397,6 +398,7 @@
   var pipOff = document.getElementById("pipOff");
   var micBtn = document.getElementById("micBtn");
   var camBtn = document.getElementById("camBtn");
+  var flipBtn = document.getElementById("flipBtn");
   var leaveBtn = document.getElementById("leaveBtn");
   var scriptBtn = document.getElementById("scriptBtn");
   var remoteWrap = document.getElementById("remoteWrap");
@@ -427,12 +429,14 @@
     cam: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>',
     camOff: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 16v1a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2m5.66 0H14a2 2 0 0 1 2 2v3.34l1 1L23 7v10"/><line x1="1" y1="1" x2="23" y2="23"/></svg>',
     leave: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-3.33-2.67m-2.67-3.34a19.79 19.79 0 0 1-3.07-8.63A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91"/><line x1="23" y1="1" x2="1" y2="23"/></svg>',
+    flip: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>',
     clipboard: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2h6a1 1 0 0 1 1 1v1h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2V3a1 1 0 0 1 1-1z"/><path d="M9 4h6"/><path d="M8 11h8M8 15h5"/></svg>'
   };
   // small inline check used in script rows
   var CHECK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
   micBtn.innerHTML = ICONS.mic;
   camBtn.innerHTML = ICONS.cam;
+  flipBtn.innerHTML = ICONS.flip;
   leaveBtn.innerHTML = ICONS.leave;
   scriptBtn.insertAdjacentHTML("afterbegin", ICONS.clipboard);
 
@@ -444,6 +448,9 @@
   var room = null;
   var micEnabled = true;
   var camEnabled = true;
+  // "user" = front (selfie, mirrored), "environment" = back (e.g. filming a
+  // thrower). Drives both the camera constraint and the local preview mirror.
+  var facingMode = "user";
 
   function tokenServerOrigin() { return window.location.origin; }
 
@@ -1246,6 +1253,9 @@
       pub.track.attach(localVideo);
       pipOff.style.display = "none";
       localVideo.style.display = "block";
+      // Mirror only the front camera (selfie). The back camera must NOT mirror,
+      // or text/handedness reads backwards when filming.
+      localVideo.style.transform = facingMode === "user" ? "scaleX(-1)" : "none";
     }
   }
 
@@ -1271,6 +1281,32 @@
     } else {
       localVideo.style.display = "none";
       pipOff.style.display = "flex";
+    }
+  });
+
+  // Flip between front (selfie) and back camera. Restarts the SAME published
+  // track in place (no republish, the coach's subscription stays intact) with
+  // the new facingMode, then re-attaches the preview with the right mirror.
+  flipBtn.addEventListener("click", async function () {
+    if (!room || !camEnabled) return;
+    var pub = room.localParticipant.getTrackPublication(Track.Source.Camera);
+    var track = pub && (pub.videoTrack || pub.track);
+    if (!track || typeof track.restartTrack !== "function") return;
+    var next = facingMode === "user" ? "environment" : "user";
+    flipBtn.disabled = true;
+    try {
+      await track.restartTrack({ facingMode: next });
+      facingMode = next;
+      attachLocalVideo();
+    } catch (e) {
+      // Some devices reject "environment" (no back cam / busy). Stay put.
+      try {
+        toastEl.textContent = "Couldn't switch camera";
+        toastEl.classList.add("show");
+        setTimeout(function () { toastEl.classList.remove("show"); }, 2000);
+      } catch (e2) {}
+    } finally {
+      flipBtn.disabled = false;
     }
   });
 

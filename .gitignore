@@ -2,3 +2,7 @@ node_modules/
 .env
 .pmloop/
 public/analyze/_sample/
+
+# local LiveKit diagnostic probes (never commit)
+.lkprobe.js
+.lkpoll.js
