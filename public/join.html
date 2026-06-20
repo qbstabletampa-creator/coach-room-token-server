@@ -489,7 +489,23 @@
       var data = await resp.json();
       if (!data.token || !data.url) throw new Error("Bad token response from server.");
 
-      room = new Room({ adaptiveStream: true, dynacast: true });
+      // Publish the sharpest layer and keep it ALWAYS sent (CJ, 2026-06-19: HD
+      // everywhere, bandwidth not a concern). dynacast:false stops the SFU from
+      // pausing the high simulcast layer when a subscriber momentarily isn't
+      // pulling it — which is exactly what left the coach on a soft/low layer
+      // (and covers the coach app's resubscribe watchdog moment). 1080p capture
+      // with a 720/360 ladder for graceful fallback. adaptiveStream stays on so
+      // the small remote view the athlete sees still adapts.
+      room = new Room({
+        adaptiveStream: true,
+        dynacast: false,
+        videoCaptureDefaults: { resolution: LK.VideoPresets.h1080.resolution },
+        publishDefaults: {
+          simulcast: true,
+          videoEncoding: LK.VideoPresets.h1080.encoding,
+          videoSimulcastLayers: [LK.VideoPresets.h360, LK.VideoPresets.h720],
+        },
+      });
       wireRoomEvents(room);
 
       await room.connect(data.url, data.token);
