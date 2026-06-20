@@ -1162,7 +1162,19 @@
 
   function pickMime() {
     if (!window.MediaRecorder) return null;
-    var prefs = ["video/mp4", "video/webm;codecs=vp9", "video/webm"];
+    // Prefer H.264 MP4 FIRST: the coach reviews on iOS (expo-video), which plays
+    // MP4/H.264 but CANNOT play WebM/VP8/VP9. Modern Safari and Chrome (M111+)
+    // can MediaRecorder H.264 MP4; we fall back to WebM only if nothing else is
+    // supported (that clip won't play on iOS — see clip transcode follow-up).
+    var prefs = [
+      "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
+      "video/mp4;codecs=avc1.42E01E",
+      "video/mp4;codecs=avc1",
+      "video/mp4",
+      "video/webm;codecs=h264",
+      "video/webm;codecs=vp9",
+      "video/webm",
+    ];
     for (var i = 0; i < prefs.length; i++) {
       try { if (MediaRecorder.isTypeSupported(prefs[i])) return prefs[i]; } catch (e) {}
     }
