@@ -237,6 +237,10 @@
   #notesList li { font-size: 14px; line-height: 1.4; color: var(--text); display: flex; gap: 8px; }
   #notesList li .nt { color: var(--gold); font-weight: 600; flex: 0 0 auto; font-size: 12px; margin-top: 1px; }
   #notesList .empty { color: var(--muted); font-size: 13px; line-height: 1.5; padding: 6px 0; }
+  #drillsList { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  #drillsList li { font-size: 14px; line-height: 1.4; color: var(--text); display: flex; gap: 8px; justify-content: space-between; }
+  #drillsList li .reps { color: var(--gold); font-weight: 600; flex: 0 0 auto; font-size: 12px; margin-top: 1px; }
+  #drillsList .empty { color: var(--muted); font-size: 13px; line-height: 1.5; padding: 6px 0; }
   /* recording pill */
   #recPill {
     position: absolute; left: 50%; transform: translateX(-50%);
@@ -322,6 +326,10 @@
         <span class="sp-title">Coach notes</span>
       </div>
       <ul id="notesList"></ul>
+      <div class="sp-head" style="margin-top:14px">
+        <span class="sp-title">Drills</span>
+      </div>
+      <ul id="drillsList"></ul>
     </div>
 
     <!-- Transient moment toast. -->
@@ -414,6 +422,7 @@
   var scriptCloseBtn = document.getElementById("scriptCloseBtn");
   var toastEl = document.getElementById("toast");
   var notesList = document.getElementById("notesList");
+  var drillsList = document.getElementById("drillsList");
   var recPill = document.getElementById("recPill");
   var recPillText = document.getElementById("recPillText");
 
@@ -662,6 +671,7 @@
   var shapes = [];                // validated ShapeWire objects (v2)
   var scriptItems = null;         // null = never received; [] = empty list
   var liveNotes = [];             // NoteWire objects from the coach
+  var liveDrills = [];            // DrillWire objects from the coach
   var cowatchActive = false;
 
   function resetCallState() {
@@ -669,10 +679,12 @@
     shapes = [];
     scriptItems = null;
     liveNotes = [];
+    liveDrills = [];
     cowatchActive = false;
     stopClipRecording("reset");
     renderShapes();
     renderScript();
+    renderDrills();
     endCowatch();
     applyMode("face");
     setUnread(false);
@@ -761,6 +773,9 @@
         break;
       case "notes:sync":
         applyNotesSync(Array.isArray(msg.items) ? msg.items : []);
+        break;
+      case "drills:sync":
+        applyDrillsSync(Array.isArray(msg.items) ? msg.items : []);
         break;
       case "cowatch:rate":
         if (cowatchVideoEl && isNum(msg.rate) && msg.rate >= 0.1 && msg.rate <= 2) {
@@ -1091,6 +1106,46 @@
       body.textContent = n.body; // peer text -> textContent only
       li.appendChild(body);
       notesList.appendChild(li);
+    }
+  }
+  function applyDrillsSync(items) {
+    var clean = [];
+    for (var i = 0; i < items.length && i < 200; i++) {
+      var it = items[i];
+      if (it && typeof it === "object") {
+        clean.push({
+          id: clampStr(it.id, 64),
+          name: clampStr(it.name, 200),
+          repTarget: isNum(it.repTarget) ? it.repTarget : 0,
+        });
+      }
+    }
+    liveDrills = clean;
+    renderDrills();
+    if (!scriptPanel.classList.contains("open")) setUnread(true);
+  }
+  function renderDrills() {
+    while (drillsList.firstChild) drillsList.removeChild(drillsList.firstChild);
+    if (!liveDrills.length) {
+      var none = document.createElement("li");
+      none.className = "empty";
+      none.textContent = "No drills yet this session.";
+      drillsList.appendChild(none);
+      return;
+    }
+    for (var i = 0; i < liveDrills.length; i++) {
+      var d = liveDrills[i];
+      var li = document.createElement("li");
+      var name = document.createElement("span");
+      name.textContent = d.name; // peer text -> textContent only
+      li.appendChild(name);
+      if (d.repTarget > 0) {
+        var reps = document.createElement("span");
+        reps.className = "reps";
+        reps.textContent = d.repTarget + " reps";
+        li.appendChild(reps);
+      }
+      drillsList.appendChild(li);
     }
   }
 
