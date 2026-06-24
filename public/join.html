@@ -1162,18 +1162,16 @@
 
   function pickMime() {
     if (!window.MediaRecorder) return null;
-    // Prefer H.264 MP4 FIRST: the coach reviews on iOS (expo-video), which plays
-    // MP4/H.264 but CANNOT play WebM/VP8/VP9. Modern Safari and Chrome (M111+)
-    // can MediaRecorder H.264 MP4; we fall back to WebM only if nothing else is
-    // supported (that clip won't play on iOS — see clip transcode follow-up).
+    // MP4-only: the coach reviews on iOS (expo-video / AVPlayer), which plays
+    // MP4/H.264 but CANNOT decode WebM/VP8/VP9 — a WebM clip is a silent black
+    // stage on iOS. Modern Safari and Chrome (M111+) can MediaRecorder H.264 MP4.
+    // If no MP4 type is supported we return "" so the caller refuses to record a
+    // WebM clip the coach can't play (CJ, 2026-06-24 — "plays on both screens").
     var prefs = [
       "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
       "video/mp4;codecs=avc1.42E01E",
       "video/mp4;codecs=avc1",
       "video/mp4",
-      "video/webm;codecs=h264",
-      "video/webm;codecs=vp9",
-      "video/webm",
     ];
     for (var i = 0; i < prefs.length; i++) {
       try { if (MediaRecorder.isTypeSupported(prefs[i])) return prefs[i]; } catch (e) {}
@@ -1188,6 +1186,11 @@
     var mime = pickMime();
     if (mime === null) {
       sendData({ v: 2, t: "clip:error", id: clipId, reason: "this browser can't record video" });
+      return;
+    }
+    // No MP4 type supported → never fall back to WebM (iOS coach can't play it).
+    if (!mime) {
+      sendData({ v: 2, t: "clip:error", id: clipId, reason: "this device can't record an iOS-playable clip" });
       return;
     }
     var pub = room && room.localParticipant ? room.localParticipant.getTrackPublication(Track.Source.Camera) : null;
@@ -1250,7 +1253,7 @@
   async function uploadClip() {
     var clipId = recClipId;
     var durationS = Math.round((Date.now() - recStartedAt) / 1000);
-    var blob = new Blob(recChunks, { type: recChunks.length && recChunks[0].type ? recChunks[0].type : "video/webm" });
+    var blob = new Blob(recChunks, { type: recChunks.length && recChunks[0].type ? recChunks[0].type : "video/mp4" });
     if (!blob.size) {
       sendData({ v: 2, t: "clip:error", id: clipId, reason: "empty recording" });
       cleanupRecorder();
@@ -1261,7 +1264,7 @@
       // athlete proves room membership with the same room ticket it used to
       // reach /token (sent as X-Room-Ticket; the raw body is the clip bytes, so
       // the ticket can't ride in the JSON body). Without it the server 401s.
-      var clipHeaders = { "Content-Type": blob.type || "video/webm" };
+      var clipHeaders = { "Content-Type": blob.type || "video/mp4" };
       if (roomTicket) clipHeaders["X-Room-Ticket"] = roomTicket;
       var resp = await fetch(tokenServerOrigin() + "/clips/" + roomId, {
         method: "POST",

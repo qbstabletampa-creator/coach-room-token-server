@@ -683,6 +683,14 @@ app.post(
           .status(415)
           .json({ error: "unsupported media: not a webm/mp4 video" });
       }
+      // Hard backstop: the iOS coach (expo-video / AVPlayer) can't decode WebM,
+      // so a WebM clip is a silent black stage. Refuse it at the server so no
+      // unplayable clip ever reaches storage (CJ, 2026-06-24).
+      if (kind === "webm") {
+        return res
+          .status(415)
+          .json({ error: "iOS coach can't play WebM - record MP4" });
+      }
       const ext = kind; // "webm" | "mp4", derived from the real bytes
       const contentType = kind === "mp4" ? "video/mp4" : "video/webm";
       const objectPath = `${room}/${Date.now()}-${Math.random()
