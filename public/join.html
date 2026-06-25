@@ -788,6 +788,9 @@
       case "clip:stop":
         finishClipRecording();
         break;
+      case "clip:freeze":
+        captureFreezeFrame(msg);
+        break;
       case "cowatch:load":
         loadCowatch(msg);
         break;
@@ -995,9 +998,22 @@
     var url = clampStr(msg.url, 2000);
     var provider = msg.provider;
     var title = clampStr(msg.title, 200);
+    var isImage = msg.kind === "image";
     clearCowatchStage();
 
-    if (provider === "other") {
+    if (isImage) {
+      // DRAW-TO-FREEZE: a shared still. Render an <img> (no transport, no sync).
+      // cowatchVideoEl stays null so cowatchSync / cowatch:rate no-op for it.
+      if (!/^https:\/\//i.test(url)) { endCowatch(); return; }
+      var img = document.createElement("img");
+      img.src = url; // src attribute, not innerHTML
+      img.id = "cowatchImage";
+      img.style.width = "100%";
+      img.style.height = "100%";
+      img.style.objectFit = "contain";
+      img.style.background = "#000";
+      cowatch.appendChild(img);
+    } else if (provider === "other") {
       // Direct film URL: must be https (CSP media-src https:). Reject otherwise.
       if (!/^https:\/\//i.test(url)) { endCowatch(); return; }
       var v = document.createElement("video");
@@ -1250,6 +1266,28 @@
     recPill.style.display = "none";
   }
 
+  // Shared upload lane for the rep clip (video) AND the freeze frame (image):
+  // same authenticated POST to /clips/<room>. The raw body is the media bytes,
+  // so the room ticket rides in X-Room-Ticket (it can't be in the JSON body).
+  // Resolves to the signed https URL, or throws with a server-supplied reason.
+  async function uploadBlob(blob, contentType) {
+    var headers = { "Content-Type": contentType || blob.type || "application/octet-stream" };
+    if (roomTicket) headers["X-Room-Ticket"] = roomTicket;
+    var resp = await fetch(tokenServerOrigin() + "/clips/" + roomId, {
+      method: "POST",
+      headers: headers,
+      body: blob
+    });
+    if (!resp.ok) {
+      var reason = "upload failed";
+      try { reason = (await resp.json()).error || reason; } catch (e) {}
+      throw new Error(reason);
+    }
+    var data = await resp.json();
+    if (!data || !data.url) throw new Error("bad upload response");
+    return data.url;
+  }
+
   async function uploadClip() {
     var clipId = recClipId;
     var durationS = Math.round((Date.now() - recStartedAt) / 1000);
@@ -1260,33 +1298,92 @@
       return;
     }
     try {
-      // Phase 0 security: clips upload is now authenticated. A no-signup browser
-      // athlete proves room membership with the same room ticket it used to
-      // reach /token (sent as X-Room-Ticket; the raw body is the clip bytes, so
-      // the ticket can't ride in the JSON body). Without it the server 401s.
-      var clipHeaders = { "Content-Type": blob.type || "video/mp4" };
-      if (roomTicket) clipHeaders["X-Room-Ticket"] = roomTicket;
-      var resp = await fetch(tokenServerOrigin() + "/clips/" + roomId, {
-        method: "POST",
-        headers: clipHeaders,
-        body: blob
-      });
-      if (!resp.ok) {
-        var reason = "upload failed";
-        try { reason = (await resp.json()).error || reason; } catch (e) {}
-        sendData({ v: 2, t: "clip:error", id: clipId, reason: reason });
-      } else {
-        var data = await resp.json();
-        if (data && data.url) {
-          sendData({ v: 2, t: "clip:ready", id: clipId, url: data.url, durationS: durationS });
-        } else {
-          sendData({ v: 2, t: "clip:error", id: clipId, reason: "bad upload response" });
-        }
-      }
+      var url = await uploadBlob(blob, blob.type || "video/mp4");
+      sendData({ v: 2, t: "clip:ready", id: clipId, url: url, durationS: durationS });
     } catch (e) {
-      sendData({ v: 2, t: "clip:error", id: clipId, reason: "network error during upload" });
+      sendData({ v: 2, t: "clip:error", id: clipId, reason: (e && e.message) || "network error during upload" });
     }
     cleanupRecorder();
+  }
+
+  // ---------------- Draw-to-freeze (the shared still) ----------------
+  // The coach arms the pen during a LIVE call; we grab ONE frame from our OWN
+  // camera (not a recording), upload it as a JPEG through the SAME lane as the
+  // rep clip, and answer clip:ready{kind:'image'}. The coach then loads it as a
+  // shared still both sides annotate over.
+  //
+  // CROSS-BROWSER: we do NOT use ImageCapture.grabFrame() (Safari/iOS has no
+  // ImageCapture). Instead we attach the camera MediaStreamTrack to a transient
+  // hidden <video>, wait for loadedmetadata, and drawImage it onto a <canvas>.
+  async function captureFreezeFrame(msg) {
+    var freezeId = clampStr(msg.id, 64);
+    var pub = room && room.localParticipant ? room.localParticipant.getTrackPublication(Track.Source.Camera) : null;
+    var msTrack = pub && pub.track ? pub.track.mediaStreamTrack : null;
+    if (!msTrack) {
+      sendData({ v: 2, t: "clip:error", id: freezeId, reason: "camera not available" });
+      return;
+    }
+    var vid = document.createElement("video");
+    vid.muted = true;
+    vid.playsInline = true;
+    vid.setAttribute("playsinline", "");
+    vid.style.position = "fixed";
+    vid.style.left = "-9999px";
+    vid.style.width = "1px";
+    vid.style.height = "1px";
+    var stream = new MediaStream([msTrack]);
+    vid.srcObject = stream;
+    document.body.appendChild(vid);
+
+    function cleanup() {
+      try { vid.pause(); } catch (e) {}
+      vid.srcObject = null;
+      if (vid.parentNode) vid.parentNode.removeChild(vid);
+    }
+
+    var done = false;
+    function fail(reason) {
+      if (done) return;
+      done = true;
+      cleanup();
+      sendData({ v: 2, t: "clip:error", id: freezeId, reason: reason });
+    }
+
+    vid.onloadedmetadata = function () {
+      var pr = vid.play();
+      if (pr && pr.catch) pr.catch(function () {});
+      // One rAF after metadata gives the first frame time to paint.
+      requestAnimationFrame(function () {
+        if (done) return;
+        var w = vid.videoWidth || 0, h = vid.videoHeight || 0;
+        if (!w || !h) { fail("no video frame"); return; }
+        var canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        var ctx = canvas.getContext("2d");
+        if (!ctx) { fail("canvas unsupported"); return; }
+        try {
+          ctx.drawImage(vid, 0, 0, w, h);
+        } catch (e) {
+          fail("frame capture failed");
+          return;
+        }
+        canvas.toBlob(function (blob) {
+          if (done) return;
+          if (!blob || !blob.size) { fail("empty frame"); return; }
+          done = true;
+          cleanup();
+          uploadBlob(blob, "image/jpeg").then(function (url) {
+            sendData({ v: 2, t: "clip:ready", id: freezeId, url: url, kind: "image", durationS: 0 });
+          }).catch(function (e) {
+            sendData({ v: 2, t: "clip:error", id: freezeId, reason: (e && e.message) || "freeze upload failed" });
+          });
+        }, "image/jpeg", 0.9);
+      });
+    };
+    vid.onerror = function () { fail("camera frame error"); };
+    // Safety net: never leave the hidden video orphaned if metadata never fires.
+    setTimeout(function () { fail("freeze timed out"); }, 8000);
   }
 
   // ---------------- Top pill ----------------

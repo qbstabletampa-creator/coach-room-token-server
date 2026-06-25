@@ -353,12 +353,15 @@ function verifyRoomTicket(ticket, room) {
 // ---- clip storage helpers (Phase 0 security) -------------------------------
 
 // Validate the REAL file type by magic bytes, not the client's Content-Type
-// header (which a malicious uploader controls). We only accept the two container
-// formats MediaRecorder produces:
+// header (which a malicious uploader controls). We accept the two container
+// formats MediaRecorder produces AND the two image formats the draw-to-freeze
+// still produces:
 //   WebM/Matroska: EBML header 1A 45 DF A3 at offset 0.
 //   MP4/QuickTime: an ISO-BMFF box with "ftyp" at bytes 4..8 ("....ftyp...").
+//   JPEG: SOI marker FF D8 FF at offset 0.
+//   PNG: signature 89 50 4E 47 0D 0A 1A 0A at offset 0.
 // Anything else (a script, an html page, a zip) is rejected with 415 before it
-// ever reaches storage. Returns "webm" | "mp4" | null.
+// ever reaches storage. Returns "webm" | "mp4" | "jpg" | "png" | null.
 function sniffVideoMagic(buf) {
   if (!buf || buf.length < 12) return null;
   // WebM / Matroska EBML.
@@ -378,6 +381,23 @@ function sniffVideoMagic(buf) {
     buf[7] === 0x70 // p
   ) {
     return "mp4";
+  }
+  // JPEG: SOI marker FF D8 FF (draw-to-freeze still).
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) {
+    return "jpg";
+  }
+  // PNG: 89 50 4E 47 0D 0A 1A 0A.
+  if (
+    buf[0] === 0x89 &&
+    buf[1] === 0x50 &&
+    buf[2] === 0x4e &&
+    buf[3] === 0x47 &&
+    buf[4] === 0x0d &&
+    buf[5] === 0x0a &&
+    buf[6] === 0x1a &&
+    buf[7] === 0x0a
+  ) {
+    return "png";
   }
   return null;
 }
@@ -637,7 +657,7 @@ app.post("/clips/sign", clipSignLimiter, async (req, res) => {
 app.post(
   "/clips/:room",
   clipLimiter,
-  express.raw({ type: ["video/*", "application/octet-stream"], limit: "40mb" }),
+  express.raw({ type: ["video/*", "image/*", "application/octet-stream"], limit: "40mb" }),
   async (req, res) => {
     try {
       if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
@@ -677,11 +697,13 @@ app.post(
       }
 
       // ---- MAGIC-BYTE validation (Phase 0): trust the bytes, not the header --
+      // Accepts mp4 (rep clip) + jpg/png (draw-to-freeze still). WebM is sniffed
+      // but bounced below (iOS coach can't decode it).
       const kind = sniffVideoMagic(body);
       if (!kind) {
         return res
           .status(415)
-          .json({ error: "unsupported media: not a webm/mp4 video" });
+          .json({ error: "unsupported media: not a mp4 video or jpg/png image" });
       }
       // Hard backstop: the iOS coach (expo-video / AVPlayer) can't decode WebM,
       // so a WebM clip is a silent black stage. Refuse it at the server so no
@@ -691,8 +713,13 @@ app.post(
           .status(415)
           .json({ error: "iOS coach can't play WebM - record MP4" });
       }
-      const ext = kind; // "webm" | "mp4", derived from the real bytes
-      const contentType = kind === "mp4" ? "video/mp4" : "video/webm";
+      const ext = kind; // "mp4" | "jpg" | "png", derived from the real bytes
+      const CONTENT_TYPES = {
+        mp4: "video/mp4",
+        jpg: "image/jpeg",
+        png: "image/png",
+      };
+      const contentType = CONTENT_TYPES[kind];
       const objectPath = `${room}/${Date.now()}-${Math.random()
         .toString(36)
         .slice(2, 8)}.${ext}`;
