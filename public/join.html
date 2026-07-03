@@ -612,8 +612,17 @@
     });
 
     // Data channel: CoachTime protocol (topic "ct.v1", reliable).
+    // LENIENT topic filter: only reject a message that carries a DIFFERENT
+    // topic. A missing/empty topic passes through. The coach app publishes with
+    // topic "ct.v1", but @livekit/react-native-webrtc (SDK 54 / 144.x) does not
+    // always propagate the topic to the browser receiver — it arrives undefined,
+    // and a strict `topic !== CALL_TOPIC` then silently dropped EVERY coach
+    // message (draw, clip, cowatch), so the athlete saw nothing while the coach
+    // rendered locally. Verified 2026-07-03: browser->browser round-trips the
+    // topic fine; RN->browser does not. This matches the coach's own lenient
+    // receive filter in useCallRoom.ts. This connection only ever carries ct.v1.
     r.on(RoomEvent.DataReceived, function (payload, participant, kind, topic) {
-      if (topic !== CALL_TOPIC) return;
+      if (topic && topic !== CALL_TOPIC) return;
       var msg = decodeMessage(payload);
       if (msg) handleCallMessage(msg);
     });
