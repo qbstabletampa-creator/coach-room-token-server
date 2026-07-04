@@ -276,7 +276,7 @@
       <p class="sub">Room <span class="room-pill" id="roomLabel">…</span><br/>Enter your name and tap join. Your browser will ask for camera and mic.</p>
       <div class="err" id="lobbyErr"></div>
       <label for="nameInput">Your name</label>
-      <input type="text" id="nameInput" autocomplete="name" placeholder="e.g. Coach Mike" maxlength="40" />
+      <input type="text" id="nameInput" autocomplete="name" placeholder="e.g. Jordan" maxlength="40" />
       <button class="btn-primary" id="joinBtn">Join session</button>
     </div>
   </div>
@@ -303,7 +303,7 @@
 
       <div id="waiting">
         <div class="dot"></div>
-        <h2>Waiting for the other coach…</h2>
+        <h2>Waiting for your coach…</h2>
         <p>You're connected. The session goes live when they join.</p>
       </div>
     </div>
@@ -605,7 +605,12 @@
 
     // Late joiners: when a participant connects after us, bind whatever they've
     // already published and stay subscribed for anything that publishes later.
-    r.on(RoomEvent.ParticipantConnected, function (p) { bindRemote(p); refreshRemoteState(); });
+    r.on(RoomEvent.ParticipantConnected, function (p) {
+      // A (re)connecting coach starts a fresh seq stream — reset the dedup
+      // watermark so a restarted app (or corrected clock) is never muted.
+      lastCoachSeq = 0;
+      bindRemote(p); refreshRemoteState();
+    });
     r.on(RoomEvent.ParticipantDisconnected, function () {
       remoteVideo.style.display = "none";
       refreshRemoteState();
@@ -752,7 +757,17 @@
     return out;
   }
 
+  var lastCoachSeq = 0;
   function handleCallMessage(msg) {
+    // Cross-transport dedup (2026-07-03): the coach stamps a monotonic `seq`
+    // on every message because a timed-out P2P send can flush LATE after the
+    // HTTPS relay already delivered it — a duplicate or stale draw:undo would
+    // pop the wrong shape. Drop anything at or below the last seen seq.
+    // Messages without a seq (older app bundles) pass through untouched.
+    if (typeof msg.seq === "number") {
+      if (msg.seq <= lastCoachSeq) return;
+      lastCoachSeq = msg.seq;
+    }
     switch (msg.t) {
       case "mode":
         applyMode(typeof msg.mode === "string" ? msg.mode : "face");
@@ -1241,7 +1256,14 @@
       sendData({ v: 2, t: "clip:error", id: recClipId || clipId, reason: "recording error" });
       cleanupRecorder();
     };
-    try { recorder.start(1000); } catch (e) {
+    // No timeslice on purpose. recorder.start(1000) emits fragmented-MP4 chunks;
+    // concatenating those into one Blob produces a container whose duration
+    // metadata only covers the FIRST fragment (~1s), so iOS AVPlayer plays and
+    // reports ~1s even though every byte is present. recorder.start() with no
+    // argument fires ondataavailable once at stop with a single finalized blob
+    // carrying correct duration metadata. Do NOT reintroduce a timeslice.
+    // (CJ, 2026-07-03 — the 1-second clip bug.)
+    try { recorder.start(); } catch (e) {
       sendData({ v: 2, t: "clip:error", id: clipId, reason: "recording error" });
       cleanupRecorder();
       return;

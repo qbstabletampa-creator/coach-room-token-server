@@ -9,7 +9,7 @@ const cors = require("cors");
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
 require("dotenv").config();
-const { AccessToken } = require("livekit-server-sdk");
+const { AccessToken, RoomServiceClient, DataPacket_Kind } = require("livekit-server-sdk");
 
 const PORT = process.env.PORT || 3130;
 const LIVEKIT_URL = process.env.LIVEKIT_URL;
@@ -46,6 +46,22 @@ if (!LIVEKIT_API_KEY || !LIVEKIT_API_SECRET || !LIVEKIT_URL) {
   );
   process.exit(1);
 }
+
+// LiveKit server API client (used by POST /data). Constructed ONCE at startup
+// from the SAME creds the AccessToken mint uses, so the data relay authenticates
+// as the LiveKit server exactly like the token path signs as it. RoomServiceClient
+// speaks HTTPS to the LiveKit REST API, so the host is LIVEKIT_URL with its
+// signalling scheme swapped: wss:// -> https:// (and ws:// -> http:// for a local
+// dev server). The env check above guarantees all three creds exist here.
+const LIVEKIT_HTTP_URL = LIVEKIT_URL.replace(/^wss:\/\//, "https://").replace(
+  /^ws:\/\//,
+  "http://",
+);
+const roomService = new RoomServiceClient(
+  LIVEKIT_HTTP_URL,
+  LIVEKIT_API_KEY,
+  LIVEKIT_API_SECRET,
+);
 
 const app = express();
 
@@ -1058,6 +1074,100 @@ app.post("/token", tokenLimiter, async (req, res) => {
   } catch (err) {
     console.error("[token-server] mint failed:", err);
     res.status(500).json({ error: "failed to mint token" });
+  }
+});
+
+// ---- data relay (coach -> athlete ct.v1 over the LiveKit server API) --------
+
+// Rate limit: 60 requests / minute / IP. This carries human-scale draw/sync
+// messages (a coach dragging an annotation, a periodic sync tick), not a
+// firehose, so 60/min per IP is generous for the fallback path while still
+// capping abuse. Same shape as tokenLimiter / ticketLimiter above.
+const dataLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many data messages, slow down." },
+});
+
+// POST /data  { room, payload, topic? }  (Authorization: Bearer <supabase JWT>)
+//   -> { ok: true }
+//
+// HTTPS relay for a coach->athlete ct.v1 data message. The app calls this when
+// the LiveKit RN data channel is dead; it must land on the athlete page EXACTLY
+// like the LiveKit server API injection that was proven to reach it — a
+// RoomServiceClient.sendData with RELIABLE delivery on topic "ct.v1".
+//
+// `payload` is base64 of the UTF-8 JSON message bytes. `topic` in the body is
+// IGNORED: this server only ever carries ct.v1, so the topic is forced
+// server-side and a client-supplied topic is never trusted.
+//
+// Sender-role gating (coach-only / session-owner) is intentionally NOT enforced
+// here yet: it matches the CURRENT LiveKit grant surface. /token grants
+// canPublishData:true to ANY authed participant (coach or athlete), so any
+// authed participant can already publishData into the room today. This relay
+// deliberately mirrors that surface — a valid Supabase JWT is required (hard 401
+// without one), nothing narrower.
+// TODO(feat/phase1-hardening): when that branch's sender gate deploys (only a
+// coach / session owner may publish ct.v1), add the SAME check here so the relay
+// can't be used to bypass it. This comment marks the merge point.
+app.post("/data", dataLimiter, async (req, res) => {
+  try {
+    const { room, payload } = req.body || {};
+
+    if (!room) {
+      return res.status(400).json({ ok: false, error: "room is required" });
+    }
+    // Same validation every other route applies before touching a LiveKit call.
+    if (!isValidRoomId(String(room))) {
+      return res.status(400).json({ ok: false, error: "bad room id" });
+    }
+    const roomStr = String(room);
+
+    // AUTH: hard 401 without a valid Supabase user JWT — the EXACT primitive
+    // /room-ticket uses. No room-ticket fallback here: the relay is an
+    // authed-user path (the coach app), not the no-signup browser athlete path.
+    const authd = await requireSupabaseUser(req);
+    if (authd.error) {
+      return res.status(authd.status).json({ ok: false, error: authd.error });
+    }
+
+    // `payload` must be a non-empty standard-base64 string of the message bytes.
+    if (typeof payload !== "string" || !payload) {
+      return res.status(400).json({ ok: false, error: "payload is required" });
+    }
+    // Strict base64 shape check BEFORE decoding: Buffer.from(..., "base64") is
+    // lenient and silently drops invalid characters, so a malformed payload
+    // would otherwise decode to garbage instead of being rejected.
+    if (!/^[A-Za-z0-9+\/]+={0,2}$/.test(payload) || payload.length % 4 !== 0) {
+      return res.status(400).json({ ok: false, error: "payload is not valid base64" });
+    }
+    const bytes = Buffer.from(payload, "base64");
+    if (!bytes.length) {
+      return res.status(400).json({ ok: false, error: "empty payload" });
+    }
+    // Size cap: 32 KB of DECODED message bytes. A ct.v1 draw/sync message is
+    // tiny; anything larger is not our traffic. 413 = payload too large.
+    if (bytes.length > 32 * 1024) {
+      return res
+        .status(413)
+        .json({ ok: false, error: "payload too large (max 32 KB)" });
+    }
+
+    // Deliver via the LiveKit server API, RELIABLE (numeric 0), topic FORCED to
+    // "ct.v1" regardless of req.body.topic. Await it so an upstream failure is
+    // surfaced, never swallowed.
+    await roomService.sendData(roomStr, bytes, DataPacket_Kind.RELIABLE, {
+      topic: "ct.v1",
+    });
+
+    res.json({ ok: true });
+  } catch (err) {
+    // The relay reached us fine but the LiveKit server API injection failed.
+    // Surface it as 502 — do not pretend the message was delivered.
+    console.error("[token-server] data relay failed:", err);
+    res.status(502).json({ ok: false, error: "failed to relay data" });
   }
 });
 
