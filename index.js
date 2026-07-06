@@ -242,6 +242,13 @@ app.get("/analyze/proxy", async (req, res) => {
   }
 });
 
+// GET /privacy — the CoachTime privacy policy (App Store + You tab link).
+// Defined BEFORE express.static so the clean /privacy URL works everywhere
+// (static would only answer /privacy.html).
+app.get("/privacy", (_req, res) => {
+  res.sendFile(path.join(__dirname, "public", "privacy.html"));
+});
+
 // Serve static assets (public/join.html etc.)
 app.use(express.static(path.join(__dirname, "public")));
 
