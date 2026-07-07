@@ -102,7 +102,7 @@
     position: absolute; top: calc(env(safe-area-inset-top, 0px) + 16px); right: 16px;
     width: 108px; height: 152px; border-radius: var(--radius); overflow: hidden;
     background: var(--surface); box-shadow: 0 6px 20px rgba(0,0,0,0.5);
-    border: 1px solid rgba(255,255,255,0.08); z-index: 5;
+    border: 1px solid rgba(212,195,106,0.3); z-index: 5;
   }
   #localVideo { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); background: #000; }
   #pipOff {
@@ -114,10 +114,25 @@
   #liveBadge {
     position: absolute; top: calc(env(safe-area-inset-top, 0px) + 18px); left: 16px;
     display: none; align-items: center; gap: 7px; z-index: 5;
-    background: rgba(0,0,0,0.45); padding: 6px 11px; border-radius: 999px;
+    background: rgba(0,0,0,0.55); border: 1px solid rgba(212,195,106,0.35);
+    -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+    padding: 6px 11px; border-radius: 999px;
     font-size: 12px; font-weight: 600; letter-spacing: .5px;
   }
   #liveBadge .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--live); box-shadow: 0 0 8px var(--live); }
+
+  /* Stage wordmark — same treatment as the lobby .brand, dark shadow backing
+     so it stays readable over live video. The status pills sit below it. */
+  #stageBrand {
+    position: absolute; left: 50%; transform: translateX(-50%);
+    top: calc(env(safe-area-inset-top, 0px) + 10px);
+    font-size: 13px; letter-spacing: 2px; text-transform: uppercase;
+    color: var(--gold); font-weight: 600; white-space: nowrap;
+    text-shadow: 0 0 10px rgba(0,0,0,0.9), 0 1px 2px rgba(0,0,0,0.85);
+    z-index: 5; pointer-events: none;
+  }
+  /* Very narrow screens: the wordmark would crowd the self-view PiP. Drop it. */
+  @media (max-width: 349px) { #stageBrand { display: none; } }
 
   /* Controls */
   #controls {
@@ -125,16 +140,20 @@
     bottom: calc(env(safe-area-inset-bottom, 0px) + 20px);
     display: flex; gap: 16px; justify-content: center; z-index: 6;
   }
+  /* Same 56px circles and hit targets — brand skin only. On = dark glass with
+     a gold ring; off = solid gold (was plain white); leave stays danger-red. */
   .ctrl {
-    width: 56px; height: 56px; border-radius: 50%; border: 0;
-    background: rgba(255,255,255,0.12); color: var(--text);
+    width: 56px; height: 56px; border-radius: 50%;
+    border: 1px solid rgba(212,195,106,0.35);
+    background: rgba(14,14,15,0.55); color: var(--text);
     display: flex; align-items: center; justify-content: center;
-    backdrop-filter: blur(8px); transition: background .15s ease;
+    -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+    transition: background .15s ease, border-color .15s ease;
   }
-  .ctrl:hover { background: rgba(255,255,255,0.2); }
-  .ctrl.off { background: rgba(255,255,255,0.92); color: #0E0E0F; }
-  .ctrl.leave { background: var(--danger); color: #fff; }
-  .ctrl.leave:hover { background: #c8452d; }
+  .ctrl:hover { background: rgba(212,195,106,0.18); border-color: rgba(212,195,106,0.6); }
+  .ctrl.off { background: var(--gold); border-color: var(--gold); color: #0E0E0F; }
+  .ctrl.leave { background: var(--danger); border-color: var(--danger); color: #fff; }
+  .ctrl.leave:hover { background: #c8452d; border-color: #c8452d; }
   .ctrl svg { width: 24px; height: 24px; }
   /* unread dot on the Script control */
   .ctrl { position: relative; }
@@ -161,7 +180,7 @@
     width: 108px; height: 152px; object-fit: cover;
     border-radius: var(--radius); z-index: 4;
     box-shadow: 0 6px 20px rgba(0,0,0,0.5);
-    border: 1px solid rgba(255,255,255,0.08);
+    border: 1px solid rgba(212,195,106,0.3);
   }
 
   /* ---------- Annotation (telestration) overlay ---------- */
@@ -183,7 +202,7 @@
   /* Top pills (freeze / co-watch banners) */
   #topPill {
     position: absolute; left: 50%; transform: translateX(-50%);
-    top: calc(env(safe-area-inset-top, 0px) + 16px);
+    top: calc(env(safe-area-inset-top, 0px) + 40px); /* clears the wordmark */
     display: none; align-items: center; gap: 8px; z-index: 9;
     max-width: calc(100% - 120px);
     background: rgba(0,0,0,0.55); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
@@ -202,7 +221,7 @@
     bottom: calc(env(safe-area-inset-bottom, 0px) + 92px);
     max-width: 420px; margin: 0 auto;
     background: rgba(22,22,26,0.96); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
-    border: 1px solid rgba(255,255,255,0.1); border-radius: 12px;
+    border: 1px solid rgba(212,195,106,0.22); border-radius: 12px;
     box-shadow: 0 16px 48px rgba(0,0,0,0.55);
     padding: 16px 16px 14px; z-index: 8; display: none;
     max-height: 52vh; overflow-y: auto; -webkit-overflow-scrolling: touch;
@@ -244,7 +263,7 @@
   /* recording pill */
   #recPill {
     position: absolute; left: 50%; transform: translateX(-50%);
-    top: calc(env(safe-area-inset-top, 0px) + 64px);
+    top: calc(env(safe-area-inset-top, 0px) + 88px); /* below wordmark + topPill */
     display: none; align-items: center; gap: 8px; z-index: 9;
     background: rgba(0,0,0,0.6); border: 1px solid rgba(227,86,59,0.5);
     color: var(--text); font-size: 13px; font-weight: 600;
@@ -307,6 +326,9 @@
         <p>You're connected. The session goes live when they join.</p>
       </div>
     </div>
+
+    <!-- Stage wordmark: quiet brand mark, top center. Decorative only. -->
+    <div id="stageBrand" aria-hidden="true">The Stable</div>
 
     <!-- Top status pill: freeze/drawing or co-watch banner. -->
     <div id="topPill"><span class="pip-dot"></span><span class="pip-text" id="topPillText"></span></div>
