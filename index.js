@@ -1328,6 +1328,7 @@ if (SCHEDULING_ENABLED) {
   app.post("/schedule/:inviteToken/cancel", scheduleWriteLimiter, scheduling.cancelBooking);
   app.post("/coach/slots/generate", slotGenLimiter, scheduling.generateSlots);
   app.post("/send-invite", scheduleWriteLimiter, scheduling.sendInvite);
+  app.post("/coach/bookings/cancel", scheduleWriteLimiter, scheduling.coachCancelBooking);
 
   // Reminders cron endpoint. Flag-gated with the rest of scheduling; the
   // handler itself enforces the cron secret. Logic lives in lib/reminders.js.

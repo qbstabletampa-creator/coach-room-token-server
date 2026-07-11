@@ -681,3 +681,269 @@ test("POST /send-invite mints an invite GET /schedule accepts as usable", async 
     server.close();
   }
 });
+
+// ===========================================================================
+// 11. POST /coach/bookings/cancel happy path: booked slot with a deduct ->
+//     200 refunded true, credits_remaining bumped, refund ledger row, slot
+//     flipped to 'cancelled'.
+// ===========================================================================
+
+test("POST /coach/bookings/cancel refunds and cancels a booked slot -> 200 refunded true", async () => {
+  const { server, port } = await startServer();
+  const mock = installFetchMock([
+    {
+      // coach JWT -> a coach-role user.
+      test: (u) => u.includes("/auth/v1/user"),
+      reply: () => ok({ id: COACH_ID, user_metadata: { role: "coach" } }),
+    },
+    {
+      // tenant + state read: the coach owns this slot and it's booked.
+      test: (u, m) =>
+        u.includes("/bookable_slots") && u.includes(`id=eq.${SLOT_ID}`) && m === "GET",
+      reply: () =>
+        ok([{ id: SLOT_ID, coach_id: COACH_ID, status: "booked", booked_by: ATHLETE_ID }]),
+    },
+    {
+      // cancel gate: flip booked -> cancelled, 1 row.
+      test: (u, m) =>
+        u.includes("/bookable_slots") && u.includes("status=eq.booked") && m === "PATCH",
+      reply: () => ok([{ id: SLOT_ID, status: "cancelled", starts_at: FUTURE, ends_at: FUTURE }]),
+    },
+    {
+      // originating deduct ledger row -> names the source purchase.
+      test: (u, m) =>
+        u.includes("/credit_deductions") && u.includes("action=eq.deduct") && m === "GET",
+      reply: () => ok([{ purchase_id: PURCHASE_ID, coach_id: COACH_ID }]),
+    },
+    {
+      // the source purchase: exhausted by this booking.
+      test: (u, m) =>
+        u.includes("/package_purchases") && u.includes(`id=eq.${PURCHASE_ID}`) && m === "GET",
+      reply: () =>
+        ok([{ id: PURCHASE_ID, credits_remaining: 0, credits_total: 5, status: "exhausted" }]),
+    },
+    {
+      // final balance re-sum after refund.
+      test: (u, m) =>
+        u.includes("/package_purchases") && u.includes("status=eq.active") && m === "GET",
+      reply: () => ok([{ credits_remaining: 1 }]),
+    },
+  ]);
+  try {
+    const res = await request(port, {
+      method: "POST",
+      path: "/coach/bookings/cancel",
+      headers: { authorization: "Bearer coach-jwt" },
+      body: JSON.stringify({ slot_id: SLOT_ID }),
+    });
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.json.refunded, true, "a credit was refunded");
+    assert.strictEqual(res.json.credits_remaining, 1, "the athlete balance was re-summed");
+    assert.strictEqual(res.json.slot.status, "cancelled", "the slot was flipped to cancelled");
+
+    // The slot flip cleared booked_by/booked_at.
+    const flip = mock.calls.find(
+      (c) => c.u.includes("/bookable_slots") && c.method === "PATCH",
+    );
+    assert.ok(flip, "the slot was PATCHed");
+    assert.strictEqual(flip.body.status, "cancelled");
+    assert.strictEqual(flip.body.booked_by, null);
+
+    // The source purchase was bumped back to 1 and reactivated.
+    const bump = mock.calls.find(
+      (c) =>
+        c.u.includes("/package_purchases") &&
+        c.u.includes(`id=eq.${PURCHASE_ID}`) &&
+        c.method === "PATCH",
+    );
+    assert.ok(bump, "the source purchase was PATCHed");
+    assert.strictEqual(bump.body.credits_remaining, 1);
+    assert.strictEqual(bump.body.status, "active", "exhausted pack reactivated");
+
+    // A refund ledger row was appended against the source purchase.
+    const refund = mock.calls.find(
+      (c) =>
+        c.u.includes("/credit_deductions") &&
+        c.method === "POST" &&
+        c.body &&
+        c.body.action === "refund",
+    );
+    assert.ok(refund, "a refund ledger row was appended");
+    assert.strictEqual(refund.body.purchase_id, PURCHASE_ID);
+    assert.strictEqual(refund.body.amount, 1);
+  } finally {
+    mock.restore();
+    server.close();
+  }
+});
+
+// ===========================================================================
+// 12. an athlete-role caller cannot coach-cancel -> 403, slot never touched
+// ===========================================================================
+
+test("POST /coach/bookings/cancel rejects an athlete-role caller with 403", async () => {
+  const { server, port } = await startServer();
+  const mock = installFetchMock([
+    {
+      test: (u) => u.includes("/auth/v1/user"),
+      reply: () => ok({ id: ATHLETE_ID, user_metadata: { role: "athlete" } }),
+    },
+  ]);
+  try {
+    const res = await request(port, {
+      method: "POST",
+      path: "/coach/bookings/cancel",
+      headers: { authorization: "Bearer athlete-jwt" },
+      body: JSON.stringify({ slot_id: SLOT_ID }),
+    });
+    assert.strictEqual(res.status, 403);
+    assert.ok(
+      !mock.calls.some((c) => c.u.includes("/bookable_slots") && c.method === "PATCH"),
+      "no slot is cancelled for a non-coach caller",
+    );
+  } finally {
+    mock.restore();
+    server.close();
+  }
+});
+
+// ===========================================================================
+// 13. a coach cannot cancel another coach's slot (cross-tenant) -> 403
+// ===========================================================================
+
+test("POST /coach/bookings/cancel rejects a cross-tenant slot with 403 cross_tenant", async () => {
+  const { server, port } = await startServer();
+  const mock = installFetchMock([
+    {
+      test: (u) => u.includes("/auth/v1/user"),
+      reply: () => ok({ id: COACH_ID, user_metadata: { role: "coach" } }),
+    },
+    {
+      // scoped read finds nothing: the slot is not this coach's.
+      test: (u, m) =>
+        u.includes("/bookable_slots") && u.includes(`id=eq.${SLOT_ID}`) && m === "GET",
+      reply: () => ok([]),
+    },
+  ]);
+  try {
+    const res = await request(port, {
+      method: "POST",
+      path: "/coach/bookings/cancel",
+      headers: { authorization: "Bearer coach-jwt" },
+      body: JSON.stringify({ slot_id: SLOT_ID }),
+    });
+    assert.strictEqual(res.status, 403);
+    assert.strictEqual(res.json.error, "cross_tenant");
+    assert.ok(
+      !mock.calls.some((c) => c.u.includes("/bookable_slots") && c.method === "PATCH"),
+      "a cross-tenant slot is never cancelled",
+    );
+  } finally {
+    mock.restore();
+    server.close();
+  }
+});
+
+// ===========================================================================
+// 14. an unbooked (open) slot -> 409 not_booked, nothing refunded
+// ===========================================================================
+
+test("POST /coach/bookings/cancel returns 409 not_booked for a slot that is not booked", async () => {
+  const { server, port } = await startServer();
+  const mock = installFetchMock([
+    {
+      test: (u) => u.includes("/auth/v1/user"),
+      reply: () => ok({ id: COACH_ID, user_metadata: { role: "coach" } }),
+    },
+    {
+      // the coach owns the slot, but it's open, not booked.
+      test: (u, m) =>
+        u.includes("/bookable_slots") && u.includes(`id=eq.${SLOT_ID}`) && m === "GET",
+      reply: () => ok([{ id: SLOT_ID, coach_id: COACH_ID, status: "open", booked_by: null }]),
+    },
+  ]);
+  try {
+    const res = await request(port, {
+      method: "POST",
+      path: "/coach/bookings/cancel",
+      headers: { authorization: "Bearer coach-jwt" },
+      body: JSON.stringify({ slot_id: SLOT_ID }),
+    });
+    assert.strictEqual(res.status, 409);
+    assert.strictEqual(res.json.error, "not_booked");
+    assert.ok(
+      !mock.calls.some((c) => c.u.includes("/bookable_slots") && c.method === "PATCH"),
+      "an unbooked slot is never flipped",
+    );
+    assert.ok(
+      !mock.calls.some(
+        (c) =>
+          c.u.includes("/credit_deductions") &&
+          c.method === "POST" &&
+          c.body &&
+          c.body.action === "refund",
+      ),
+      "nothing is refunded when the slot was not booked",
+    );
+  } finally {
+    mock.restore();
+    server.close();
+  }
+});
+
+// ===========================================================================
+// 15. a booked slot with NO deduct to reverse -> 200 refunded false,
+//     credits_remaining null (zero-credit legacy booking).
+// ===========================================================================
+
+test("POST /coach/bookings/cancel on a no-deduct booking -> 200 refunded false, credits_remaining null", async () => {
+  const { server, port } = await startServer();
+  const mock = installFetchMock([
+    {
+      test: (u) => u.includes("/auth/v1/user"),
+      reply: () => ok({ id: COACH_ID, user_metadata: { role: "coach" } }),
+    },
+    {
+      test: (u, m) =>
+        u.includes("/bookable_slots") && u.includes(`id=eq.${SLOT_ID}`) && m === "GET",
+      reply: () =>
+        ok([{ id: SLOT_ID, coach_id: COACH_ID, status: "booked", booked_by: ATHLETE_ID }]),
+    },
+    {
+      test: (u, m) =>
+        u.includes("/bookable_slots") && u.includes("status=eq.booked") && m === "PATCH",
+      reply: () => ok([{ id: SLOT_ID, status: "cancelled", starts_at: FUTURE, ends_at: FUTURE }]),
+    },
+    {
+      // no deduct ledger row exists for this slot -> nothing to refund.
+      test: (u, m) =>
+        u.includes("/credit_deductions") && u.includes("action=eq.deduct") && m === "GET",
+      reply: () => ok([]),
+    },
+  ]);
+  try {
+    const res = await request(port, {
+      method: "POST",
+      path: "/coach/bookings/cancel",
+      headers: { authorization: "Bearer coach-jwt" },
+      body: JSON.stringify({ slot_id: SLOT_ID }),
+    });
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.json.refunded, false, "no deduct means no refund");
+    assert.strictEqual(res.json.credits_remaining, null, "credits_remaining is null with no refund");
+    assert.strictEqual(res.json.slot.status, "cancelled", "the slot is still cancelled");
+    assert.ok(
+      !mock.calls.some(
+        (c) =>
+          c.u.includes("/credit_deductions") &&
+          c.method === "POST" &&
+          c.body &&
+          c.body.action === "refund",
+      ),
+      "no refund ledger row is appended when there was no deduct",
+    );
+  } finally {
+    mock.restore();
+    server.close();
+  }
+});

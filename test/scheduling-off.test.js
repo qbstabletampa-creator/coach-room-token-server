@@ -60,3 +60,13 @@ test("POST /send-invite 404s when SCHEDULING_ENABLED is off", async () => {
     server.close();
   }
 });
+
+test("POST /coach/bookings/cancel 404s when SCHEDULING_ENABLED is off", async () => {
+  const { server, port } = await startServer();
+  try {
+    const res = await request(port, "/coach/bookings/cancel", "POST");
+    assert.strictEqual(res.status, 404, "coach cancel is absent until the flag is on");
+  } finally {
+    server.close();
+  }
+});
