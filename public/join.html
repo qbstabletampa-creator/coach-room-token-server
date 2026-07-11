@@ -761,6 +761,10 @@
       color: COLOR_RE.test(sh.color) ? sh.color : "#D4C36A",
       width: isNum(sh.width) ? Math.max(1, Math.min(12, sh.width)) : 4
     };
+    // Coordinate space: cs === 1 means video-frame fractions (renderShapes maps
+    // them through the content rect). Must survive the whitelist or every shape
+    // silently falls back to legacy full-container mapping.
+    if (sh.cs === 1) out.cs = 1;
     if (sh.tool === "pen") {
       var d = safePath(sh.d);
       if (!d) return null;
@@ -903,18 +907,43 @@
     var cos = Math.max(-1, Math.min(1, (v1x * v2x + v1y * v2y) / (m1 * m2)));
     return Math.round(Math.acos(cos) * 180 / Math.PI);
   }
-  // Denormalize a pen path "M x y L x y" from 0..1 to pixels.
-  function denormPath(d, w, h) {
+  // Denormalize a pen path "M x y L x y" from fractions to pixels: n*scale +
+  // offset per axis. Legacy shapes pass (w, h, 0, 0); cs shapes pass the
+  // content rect so the path lands on the video frame.
+  function denormPath(d, sx, sy, ox, oy) {
     var parts = d.split(/\s+/), axis = 0, out = [];
     for (var i = 0; i < parts.length; i++) {
       var tok = parts[i];
       if (tok === "M" || tok === "L") { axis = 0; out.push(tok); continue; }
       var n = Number(tok);
       if (isNaN(n)) { out.push(tok); continue; }
-      out.push((n * (axis === 0 ? w : h)).toFixed(1));
+      out.push((axis === 0 ? n * sx + ox : n * sy + oy).toFixed(1));
       axis = axis === 0 ? 1 : 0;
     }
     return out.join(" ");
+  }
+  // Where the ACTIVE stage's video frame sits inside the overlay (the 7/8
+  // pillarbox fix; mirrors the app's lib/call/content-rect.ts). Shapes with
+  // cs === 1 carry video-frame fractions and map through this rect. Co-watch
+  // clip/still = contain, live coach camera = cover. Null (dims not loaded
+  // yet, or an embed iframe we can't measure) falls back to legacy mapping.
+  function activeStageRect(w, h) {
+    var vw = 0, vh = 0, fit = "cover";
+    if (cowatchActive) {
+      fit = "contain";
+      if (cowatchVideoEl && cowatchVideoEl.videoWidth) {
+        vw = cowatchVideoEl.videoWidth; vh = cowatchVideoEl.videoHeight;
+      } else {
+        var cimg = document.getElementById("cowatchImage");
+        if (cimg && cimg.naturalWidth) { vw = cimg.naturalWidth; vh = cimg.naturalHeight; }
+      }
+    } else if (remoteVideo && remoteVideo.videoWidth) {
+      vw = remoteVideo.videoWidth; vh = remoteVideo.videoHeight;
+    }
+    if (!vw || !vh || !w || !h) return null;
+    var scale = fit === "cover" ? Math.max(w / vw, h / vh) : Math.min(w / vw, h / vh);
+    var cw = vw * scale, ch = vh * scale;
+    return { x: (w - cw) / 2, y: (h - ch) / 2, w: cw, h: ch };
   }
   function renderShapes() {
     while (annoSvg.firstChild) annoSvg.removeChild(annoSvg.firstChild);
@@ -923,13 +952,21 @@
     if (!show) return;
     var w = annoOverlay.clientWidth || 1, h = annoOverlay.clientHeight || 1;
     annoSvg.setAttribute("viewBox", "0 0 " + w + " " + h);
-    var X = function (p) { return p.x * w; }, Y = function (p) { return p.y * h; };
+    var rect = activeStageRect(w, h);
+    var Xl = function (p) { return p.x * w; }, Yl = function (p) { return p.y * h; };
+    var Xr = function (p) { return rect.x + p.x * rect.w; };
+    var Yr = function (p) { return rect.y + p.y * rect.h; };
     for (var i = 0; i < shapes.length; i++) {
       var sh = shapes[i];
+      var useR = sh.cs === 1 && rect;
+      var X = useR ? Xr : Xl, Y = useR ? Yr : Yl;
+      var RW = useR ? rect.w : w;
       var stroke = { stroke: sh.color, "stroke-width": sh.width, fill: "none",
                      "stroke-linecap": "round", "stroke-linejoin": "round" };
       if (sh.tool === "pen") {
-        annoSvg.appendChild(el("path", Object.assign({ d: denormPath(sh.d, w, h) }, stroke)));
+        var pd = useR ? denormPath(sh.d, rect.w, rect.h, rect.x, rect.y)
+                      : denormPath(sh.d, w, h, 0, 0);
+        annoSvg.appendChild(el("path", Object.assign({ d: pd }, stroke)));
       } else if (sh.tool === "line") {
         annoSvg.appendChild(el("line", Object.assign({ x1: X(sh.from), y1: Y(sh.from), x2: X(sh.to), y2: Y(sh.to) }, stroke)));
       } else if (sh.tool === "arrow") {
@@ -939,7 +976,7 @@
         annoSvg.appendChild(el("line", Object.assign({ x1: x2, y1: y2, x2: x2 + head * Math.cos(ang + Math.PI - 0.45), y2: y2 + head * Math.sin(ang + Math.PI - 0.45) }, stroke)));
         annoSvg.appendChild(el("line", Object.assign({ x1: x2, y1: y2, x2: x2 + head * Math.cos(ang + Math.PI + 0.45), y2: y2 + head * Math.sin(ang + Math.PI + 0.45) }, stroke)));
       } else if (sh.tool === "circle") {
-        annoSvg.appendChild(el("circle", Object.assign({ cx: X(sh.center), cy: Y(sh.center), r: sh.r * w }, stroke)));
+        annoSvg.appendChild(el("circle", Object.assign({ cx: X(sh.center), cy: Y(sh.center), r: sh.r * RW }, stroke)));
       } else if (sh.tool === "angle") {
         annoSvg.appendChild(el("line", Object.assign({ x1: X(sh.p2), y1: Y(sh.p2), x2: X(sh.p1), y2: Y(sh.p1) }, stroke)));
         annoSvg.appendChild(el("line", Object.assign({ x1: X(sh.p2), y1: Y(sh.p2), x2: X(sh.p3), y2: Y(sh.p3) }, stroke)));
@@ -952,6 +989,9 @@
     }
   }
   window.addEventListener("resize", function () { if (shapes.length) renderShapes(); });
+  // The content rect depends on the video's native dims, which arrive after the
+  // stream/clip attaches — repaint existing ink the moment they land.
+  remoteVideo.addEventListener("loadedmetadata", function () { if (shapes.length) renderShapes(); });
 
   // ---------------- Practice script (read-only) ----------------
   function applyScriptSync(items) {
@@ -1058,6 +1098,7 @@
       img.style.height = "100%";
       img.style.objectFit = "contain";
       img.style.background = "#000";
+      img.addEventListener("load", function () { if (shapes.length) renderShapes(); });
       cowatch.appendChild(img);
     } else if (provider === "other") {
       // Direct film URL: must be https (CSP media-src https:). Reject otherwise.
@@ -1068,6 +1109,7 @@
       v.playsInline = true;
       v.controls = false;
       v.id = "cowatchVideo";
+      v.addEventListener("loadedmetadata", function () { if (shapes.length) renderShapes(); });
       cowatch.appendChild(v);
       cowatchVideoEl = v;
     } else if (provider === "youtube") {
@@ -1100,6 +1142,9 @@
     // Drop the freeze scrim; shapes persist (draw-over-film is allowed in v2).
     freezeScrim.style.display = "none";
     showTopPill("Watching with coach" + (title ? " · " + title : ""));
+    // The active stage flipped to the film — remap existing ink to its rect
+    // (media dims may still be loading; the loadedmetadata/load hooks repaint).
+    if (shapes.length) renderShapes();
   }
 
   function cowatchSync(action, pos) {
@@ -1126,6 +1171,8 @@
     cowatchActive = false;
     remoteWrap.classList.remove("cowatch"); // restore full camera stage
     if (callMode !== "freeze") hideTopPill();
+    // The active stage flipped back to the camera — remap ink to its rect.
+    if (shapes.length) renderShapes();
   }
 
   // ---------------- Shared live notes (read-only) ----------------
