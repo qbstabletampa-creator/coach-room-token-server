@@ -18,6 +18,7 @@ const { notify } = require("./lib/notify");
 const { stripeWebhookHandler } = require("./lib/stripe-webhook");
 const { createSessionHandler } = require("./lib/checkout");
 const { buildSchedulingHandlers } = require("./lib/scheduling");
+const { buildAccountDeleteHandler } = require("./lib/account-delete");
 
 const PORT = process.env.PORT || 3130;
 const LIVEKIT_URL = process.env.LIVEKIT_URL;
@@ -1235,6 +1236,28 @@ app.post("/data", dataLimiter, async (req, res) => {
   }
 });
 
+// ---- account deletion (D1 — App Store 5.1.1(v)) -----------------------------
+// In-app account deletion Apple requires. NOT flag-gated: it is a compliance
+// feature and acts ONLY on the authenticated caller. The identity deleted comes
+// exclusively from the verified JWT (never the request body). Coach = full
+// cascade of everything they own in dependency-safe order (credit ledger before
+// purchases, children before parents, storage objects), then the auth user.
+// Athlete = unlink the coach-owned card, drop the caller's own device/notify
+// rows, then the auth user. A mid-cascade failure returns 500 and never closes
+// the auth user, so a retry is safe (every delete is filtered + idempotent).
+const accountDeleteLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10, // destructive + rare; a coach closes their account once.
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many requests, slow down." },
+});
+app.post(
+  "/account/delete",
+  accountDeleteLimiter,
+  buildAccountDeleteHandler({ requireSupabaseUser }),
+);
+
 // ---- payments backbone routes (additive, env-flag guarded OFF by default) ---
 // Nothing below changes any existing route. When the flags are unset (the
 // production default today) none of these routes are registered at all.
@@ -1359,4 +1382,6 @@ module.exports = {
   getPackage,
   // Scheduling backbone (additive). Exported for unit tests + future callers.
   buildSchedulingHandlers,
+  // Account deletion (D1). Exported for unit tests + future callers.
+  buildAccountDeleteHandler,
 };
