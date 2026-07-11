@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "node --test test/clips.test.js"
+    "test": "node --test"
   },
   "dependencies": {
     "cors": "^2.8.5",
@@ -14,5 +14,9 @@
     "express-rate-limit": "^7.4.1",
     "helmet": "^8.0.0",
     "livekit-server-sdk": "^2.15.4"
+  },
+  "optionalDependencies": {
+    "resend": "^4.0.0",
+    "stripe": "^17.0.0"
   }
 }

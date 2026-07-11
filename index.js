@@ -11,6 +11,13 @@ const rateLimit = require("express-rate-limit");
 require("dotenv").config();
 const { AccessToken, RoomServiceClient, DataPacket_Kind } = require("livekit-server-sdk");
 
+// Notification + payments backbone (additive; all new routes are env-flag
+// guarded OFF by default). These modules are self-contained and read their env
+// at call time, so requiring them here has zero effect on existing routes.
+const { notify } = require("./lib/notify");
+const { stripeWebhookHandler } = require("./lib/stripe-webhook");
+const { createSessionHandler } = require("./lib/checkout");
+
 const PORT = process.env.PORT || 3130;
 const LIVEKIT_URL = process.env.LIVEKIT_URL;
 const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY;
@@ -39,6 +46,18 @@ const CLIP_SIGN_TTL_S = Number(process.env.CLIP_SIGN_TTL_S || 7 * 24 * 60 * 60);
 // link, the athlete opens it within the half hour. Short enough that a leaked
 // link dies fast, long enough to absorb "open it in a few minutes".
 const ROOM_TICKET_TTL_MS = 30 * 60 * 1000;
+
+// Payments backbone feature flags (CJ, 2026-07-10). Everything new here is OFF
+// by default so it is completely inert in production until CJ flips the flag.
+//   - CHECKOUT_ENABLED gates POST /checkout/create-session.
+//   - STRIPE_WEBHOOK_ENABLED gates POST /stripe/webhook (and its raw-body mount).
+// A flag counts as ON only for the exact strings "1" or "true".
+function envFlag(name) {
+  const v = process.env[name];
+  return v === "1" || v === "true";
+}
+const CHECKOUT_ENABLED = envFlag("CHECKOUT_ENABLED");
+const STRIPE_WEBHOOK_ENABLED = envFlag("STRIPE_WEBHOOK_ENABLED");
 
 if (!LIVEKIT_API_KEY || !LIVEKIT_API_SECRET || !LIVEKIT_URL) {
   console.error(
@@ -148,6 +167,18 @@ app.use(
     },
   }),
 );
+// Stripe webhook raw body: MUST be mounted BEFORE express.json() so the signed
+// bytes reach the handler intact. Path-scoped, so it touches ONLY the new
+// /stripe/webhook route — every existing route still gets express.json() below
+// exactly as before. express.raw sets req._body, so the express.json() that
+// follows skips this path (no double-parse). Gated OFF by default.
+if (STRIPE_WEBHOOK_ENABLED) {
+  app.use(
+    "/stripe/webhook",
+    express.raw({ type: "*/*", limit: "1mb" }),
+  );
+}
+
 app.use(express.json());
 
 // ---- Analyze v1: same-origin CORS proxy --------------------------------------
@@ -1178,6 +1209,65 @@ app.post("/data", dataLimiter, async (req, res) => {
   }
 });
 
+// ---- payments backbone routes (additive, env-flag guarded OFF by default) ---
+// Nothing below changes any existing route. When the flags are unset (the
+// production default today) none of these routes are registered at all.
+
+// POST /stripe/webhook — Stripe event receiver. PUBLIC (Stripe calls it
+// server-to-server). Raw body is already mounted above (before express.json).
+// Always ACK 200 except a genuinely bad signature (400). Simulated when no
+// STRIPE_WEBHOOK_SECRET is set. Handler + verification live in lib/stripe-webhook.js.
+if (STRIPE_WEBHOOK_ENABLED) {
+  const stripeWebhookLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 120, // Stripe can burst redeliveries; generous but capped.
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many webhook deliveries." },
+  });
+  app.post("/stripe/webhook", stripeWebhookLimiter, stripeWebhookHandler);
+}
+
+// Look up a package (session pack) row by id via Supabase REST. Returns the row
+// ({ id, name, price_cents, active }) or null. Service key, server-side only —
+// this is the authority for the checkout amount, never the client.
+async function getPackage(packageId) {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return null;
+  const q =
+    `${SUPABASE_URL}/rest/v1/packages` +
+    `?id=eq.${encodeURIComponent(packageId)}` +
+    `&select=id,name,price_cents,active&limit=1`;
+  const resp = await fetch(q, {
+    headers: { apikey: SUPABASE_SERVICE_KEY, authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
+  });
+  if (!resp.ok) {
+    if (resp.status !== 404) {
+      console.error("[checkout] package lookup non-ok:", resp.status);
+    }
+    return null;
+  }
+  const rows = await resp.json().catch(() => []);
+  return Array.isArray(rows) && rows[0] ? rows[0] : null;
+}
+
+// POST /checkout/create-session — simulated-mode-first checkout. Identity from
+// the verified JWT; amount computed server-side from the package row. Guarded
+// behind CHECKOUT_ENABLED (default OFF). Logic lives in lib/checkout.js.
+if (CHECKOUT_ENABLED) {
+  const checkoutLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 20,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many checkout attempts, slow down." },
+  });
+  const createSession = createSessionHandler({
+    requireSupabaseUser,
+    getPackage,
+  });
+  app.post("/checkout/create-session", checkoutLimiter, createSession);
+}
+
 // Only bind the port when run directly (node index.js). When required by a test
 // (require.main !== module) we export the pure helpers for unit testing and skip
 // listen(), so tests never open a socket or need live LiveKit/Supabase creds.
@@ -1196,4 +1286,7 @@ module.exports = {
   isValidRoomId,
   signClipUrl,
   resolveClipObjectPath,
+  // Payments backbone (additive). Exported for unit tests + future callers.
+  notify,
+  getPackage,
 };
