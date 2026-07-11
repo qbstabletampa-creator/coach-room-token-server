@@ -1,0 +1,730 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>CoachTime — Book a Session</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    color-scheme: dark;
+    --canvas: #0E0E0F;
+    --surface: #16161A;
+    --surface-2: #1E1E24;
+    --line: #2A2A30;
+    --text: #F2F0EB;
+    --muted: #B8B6B0;
+    --gold: #D4C36A;
+    --live: #3BE37A;
+    --danger: #E3563B;
+    --radius: 8px;
+  }
+  * { box-sizing: border-box; }
+  html, body { min-height: 100%; margin: 0; }
+  body {
+    background: var(--canvas);
+    color: var(--text);
+    font-family: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  button { font-family: inherit; cursor: pointer; }
+
+  .wrap {
+    max-width: 480px; margin: 0 auto;
+    padding: 28px 20px calc(env(safe-area-inset-bottom, 0px) + 40px);
+  }
+
+  /* ---------- Brand header ---------- */
+  .brand { font-size: 13px; letter-spacing: 2px; text-transform: uppercase; color: var(--gold); margin: 0 0 6px; font-weight: 600; }
+  h1 { font-size: 26px; font-weight: 700; margin: 0 0 6px; line-height: 1.2; }
+  .sub { font-size: 14px; color: var(--muted); margin: 0; line-height: 1.5; }
+
+  /* ---------- Credit pill ---------- */
+  .credit-pill {
+    display: inline-flex; align-items: center; gap: 7px;
+    margin-top: 16px;
+    background: var(--surface-2); border: 1px solid var(--line);
+    color: var(--text); font-size: 13px; font-weight: 600;
+    padding: 7px 13px; border-radius: 999px;
+  }
+  .credit-pill .cdot { width: 8px; height: 8px; border-radius: 50%; background: var(--gold); }
+  .credit-pill.zero .cdot { background: var(--muted); }
+
+  /* ---------- Zero-credit / packs panel ---------- */
+  .packs {
+    margin-top: 20px;
+    background: var(--surface); border: 1px solid rgba(212,195,106,0.3);
+    border-radius: var(--radius); padding: 18px 18px 16px;
+  }
+  .packs h2 { font-size: 16px; margin: 0 0 6px; font-weight: 700; }
+  .packs p { font-size: 13.5px; color: var(--muted); margin: 0 0 14px; line-height: 1.5; }
+  .packs .cta {
+    display: inline-block; text-decoration: none;
+    background: var(--gold); color: #0E0E0F; font-weight: 700; font-size: 14px;
+    padding: 11px 18px; border-radius: var(--radius);
+  }
+
+  /* ---------- Timezone note ---------- */
+  .tz-note {
+    margin: 26px 0 12px; font-size: 12.5px; color: var(--muted);
+    letter-spacing: .2px;
+  }
+
+  /* ---------- Day groups + slots ---------- */
+  .day { margin-bottom: 22px; }
+  .day-label {
+    font-size: 13px; font-weight: 600; color: var(--gold);
+    text-transform: uppercase; letter-spacing: 1px; margin: 0 0 10px;
+  }
+  .slots { display: flex; flex-direction: column; gap: 10px; }
+  .slot {
+    width: 100%; text-align: left;
+    background: var(--surface); border: 1px solid var(--line);
+    color: var(--text); border-radius: var(--radius);
+    padding: 15px 16px; font-size: 15px; font-weight: 600;
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    transition: border-color .15s ease, background .15s ease;
+  }
+  .slot:hover { border-color: rgba(212,195,106,0.6); background: var(--surface-2); }
+  .slot .slot-time { display: flex; flex-direction: column; gap: 2px; }
+  .slot .slot-title { font-size: 12.5px; font-weight: 500; color: var(--muted); }
+  .slot .chev { color: var(--gold); font-size: 20px; line-height: 1; flex: 0 0 auto; }
+
+  /* ---------- States: loading / error / empty ---------- */
+  .center-state {
+    min-height: 60vh; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; text-align: center;
+  }
+  .dot {
+    width: 12px; height: 12px; border-radius: 50%; background: var(--gold);
+    margin: 0 0 18px; animation: pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100% { opacity:.35; transform:scale(.85);} 50% { opacity:1; transform:scale(1);} }
+  .center-state h2 { font-size: 19px; margin: 0 0 8px; font-weight: 600; }
+  .center-state p { font-size: 14px; color: var(--muted); margin: 0; max-width: 320px; line-height: 1.55; }
+  .empty-slots {
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 22px 18px; text-align: center;
+    color: var(--muted); font-size: 14px; line-height: 1.55;
+  }
+
+  .err-banner {
+    background: rgba(227,86,59,0.12); border: 1px solid rgba(227,86,59,0.4);
+    color: #F0A99A; font-size: 13px; padding: 11px 13px; border-radius: var(--radius);
+    margin: 16px 0 0; line-height: 1.45;
+  }
+
+  /* ---------- Confirm sheet ---------- */
+  /* Elements toggled by the show()/hide() helpers start hidden via an inline
+     style (which show() clears), NOT a CSS rule, so revealing them can't be
+     defeated by the rule winning after the inline style is cleared. */
+  #sheetScrim {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+    z-index: 20;
+  }
+  #sheet {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 21;
+    background: var(--surface); border-top: 1px solid rgba(212,195,106,0.25);
+    border-radius: 16px 16px 0 0;
+    padding: 22px 20px calc(env(safe-area-inset-bottom, 0px) + 22px);
+    max-width: 480px; margin: 0 auto;
+    box-shadow: 0 -12px 48px rgba(0,0,0,0.55);
+    display: none;
+    transform: translateY(100%); transition: transform .22s ease;
+  }
+  #sheet.open { display: block; transform: translateY(0); }
+  #sheet .sheet-k { font-size: 12px; letter-spacing: 1px; text-transform: uppercase; color: var(--gold); font-weight: 600; margin: 0 0 8px; }
+  #sheet .sheet-day { font-size: 20px; font-weight: 700; margin: 0 0 2px; }
+  #sheet .sheet-time { font-size: 15px; color: var(--muted); margin: 0 0 4px; }
+  #sheet .sheet-title { font-size: 13.5px; color: var(--muted); margin: 0 0 18px; }
+  #sheet .sheet-err {
+    background: rgba(227,86,59,0.12); border: 1px solid rgba(227,86,59,0.4);
+    color: #F0A99A; font-size: 13px; padding: 10px 12px; border-radius: var(--radius);
+    margin: 0 0 14px; line-height: 1.45;
+  }
+  .btn-primary {
+    width: 100%; background: var(--gold); color: #0E0E0F; border: 0;
+    font-size: 16px; font-weight: 700; padding: 15px; border-radius: var(--radius);
+    transition: opacity .15s ease;
+  }
+  .btn-primary:hover { opacity: .9; }
+  .btn-primary:disabled { opacity: .5; cursor: default; }
+  .btn-ghost {
+    width: 100%; background: none; color: var(--muted); border: 0;
+    font-size: 14px; font-weight: 600; padding: 13px; margin-top: 4px;
+  }
+  .btn-ghost:hover { color: var(--text); }
+
+  /* ---------- Success view ---------- */
+  .check-badge {
+    width: 66px; height: 66px; border-radius: 50%;
+    background: rgba(59,227,122,0.14); border: 1px solid rgba(59,227,122,0.5);
+    display: flex; align-items: center; justify-content: center;
+    margin: 0 auto 20px;
+  }
+  .check-badge svg { width: 30px; height: 30px; stroke: var(--live); }
+  #success h1 { text-align: center; font-size: 24px; margin: 0 0 8px; }
+  #success .s-day { text-align: center; font-size: 19px; font-weight: 700; color: var(--gold); margin: 0 0 2px; }
+  #success .s-time { text-align: center; font-size: 15px; color: var(--muted); margin: 0 0 26px; }
+  .s-card {
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 18px; margin-bottom: 14px;
+  }
+  .s-card h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin: 0 0 12px; font-weight: 600; }
+  .s-card a.cal {
+    display: flex; align-items: center; gap: 10px; text-decoration: none;
+    color: var(--text); font-size: 14.5px; font-weight: 600;
+    padding: 12px 14px; background: var(--surface-2); border: 1px solid var(--line);
+    border-radius: var(--radius); margin-bottom: 10px;
+  }
+  .s-card a.cal:last-child { margin-bottom: 0; }
+  .s-card a.cal:hover { border-color: rgba(212,195,106,0.6); }
+  .s-card a.cal .cal-ico { color: var(--gold); font-size: 18px; }
+  .s-card p { font-size: 13.5px; color: var(--muted); margin: 0; line-height: 1.55; }
+  .join-note {
+    display: flex; align-items: flex-start; gap: 10px;
+    font-size: 13.5px; color: var(--muted); line-height: 1.55;
+  }
+  .join-note .jdot { width: 8px; height: 8px; border-radius: 50%; background: var(--live); margin-top: 6px; flex: 0 0 auto; box-shadow: 0 0 8px var(--live); }
+</style>
+</head>
+<body>
+
+  <div class="wrap">
+    <!-- Loading -->
+    <div id="loading" class="center-state">
+      <div class="dot" aria-hidden="true"></div>
+      <h2>Loading your session times…</h2>
+      <p>One sec while we pull your coach's open slots.</p>
+    </div>
+
+    <!-- Invalid / expired token -->
+    <div id="badLink" class="center-state" style="display:none">
+      <h2 id="badLinkTitle">This booking link isn't working.</h2>
+      <p id="badLinkMsg">Ask your coach to text you a fresh booking link. It takes them one tap.</p>
+    </div>
+
+    <!-- Main booking view -->
+    <div id="booking" style="display:none">
+      <p class="brand">CoachTime</p>
+      <h1 id="coachHeading">Book a session</h1>
+      <p class="sub">Pick a time that works. No account, no forms.</p>
+
+      <div id="creditPill" class="credit-pill" style="display:none">
+        <span class="cdot" aria-hidden="true"></span><span id="creditText"></span>
+      </div>
+
+      <div id="packs" class="packs" style="display:none">
+        <h2>Out of session credits</h2>
+        <p id="packsMsg">Ask your coach about session packs to book your next one.</p>
+        <a id="packsCta" class="cta" style="display:none" target="_blank" rel="noopener">See session packs</a>
+      </div>
+
+      <div id="errBanner" class="err-banner" style="display:none"></div>
+
+      <p id="tzNote" class="tz-note" style="display:none"></p>
+
+      <div id="dayGroups"></div>
+
+      <div id="emptySlots" class="empty-slots" style="display:none">
+        No open times right now. Your coach adds new slots often, check back soon or ask them to open one.
+      </div>
+    </div>
+
+    <!-- Success -->
+    <div id="success" style="display:none">
+      <div class="check-badge" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+      </div>
+      <h1>You're booked.</h1>
+      <p class="s-day" id="succDay"></p>
+      <p class="s-time" id="succTime"></p>
+
+      <div class="s-card">
+        <h3>Add to calendar</h3>
+        <a class="cal" id="gcalLink" target="_blank" rel="noopener">
+          <span class="cal-ico" aria-hidden="true">📅</span><span>Add to Google Calendar</span>
+        </a>
+        <a class="cal" id="icsLink" style="display:none" target="_blank" rel="noopener">
+          <span class="cal-ico" aria-hidden="true">⬇</span><span>Download calendar invite (.ics)</span>
+        </a>
+        <p id="icsEmailedNote">We also emailed you a calendar invite.</p>
+      </div>
+
+      <div class="s-card">
+        <h3>Your session</h3>
+        <div class="join-note">
+          <span class="jdot" aria-hidden="true"></span>
+          <span>Your coach will go live here. When it's time, open this link again or the one your coach sends and you'll join the room.</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Confirm sheet -->
+  <div id="sheetScrim" style="display:none"></div>
+  <div id="sheet" role="dialog" aria-modal="true" aria-label="Confirm booking">
+    <p class="sheet-k">Confirm your session</p>
+    <p class="sheet-day" id="sheetDay"></p>
+    <p class="sheet-time" id="sheetTime"></p>
+    <p class="sheet-title" id="sheetTitle" style="display:none"></p>
+    <div class="sheet-err" id="sheetErr" style="display:none"></div>
+    <button class="btn-primary" id="confirmBtn">Confirm booking</button>
+    <button class="btn-ghost" id="cancelSheetBtn">Not now</button>
+  </div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ===========================================================================
+  //  Athlete booking page. Zero-account: the invite token in the path IS the
+  //  athlete's identity (north star: "no filing taxes just to get coached
+  //  online"). No login, no signup, no form fields.
+  //
+  //  Wire contract — matched to lib/scheduling.js as actually implemented by the
+  //  server cluster (2026-07-10), the authority over the contract doc's sketch:
+  //
+  //  GET /schedule/:inviteToken  -> 200 {
+  //    coachName,                          // string
+  //    athleteId,                          // uuid | null (server derives identity from the token)
+  //    credits,                            // integer >= 0
+  //    slots: [ { id, starts_at, ends_at, timezone, title } ]  // starts_at/ends_at real UTC ISO
+  //  }
+  //    404 { error }  -> invite not found OR expired (indistinguishable, honest error state)
+  //    400 { error }  -> bad token ;  503 { error } -> not configured
+  //
+  //  POST /schedule/:inviteToken/book { slotId }
+  //    200 { slot, session_id, credits_remaining }
+  //    402 { error: "no_credits", checkoutHint: { path, message } }   // no dead end
+  //    409 { error: "slot_unavailable" }
+  //    400 { error }  (e.g. invite not assigned to an athlete)
+  //
+  //  Everything from the API is treated as hostile: textContent only, never
+  //  innerHTML, and every URL is https-validated before it becomes an href.
+  // ===========================================================================
+
+  var UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+  // ---- invite token from the path: /book/<token> ----
+  var parts = window.location.pathname.split("/").filter(Boolean);
+  var inviteToken = parts.length ? parts[parts.length - 1] : "";
+
+  // ---- elements ----
+  var loadingEl = document.getElementById("loading");
+  var badLinkEl = document.getElementById("badLink");
+  var badLinkTitle = document.getElementById("badLinkTitle");
+  var badLinkMsg = document.getElementById("badLinkMsg");
+  var bookingEl = document.getElementById("booking");
+  var successEl = document.getElementById("success");
+  var coachHeading = document.getElementById("coachHeading");
+  var creditPill = document.getElementById("creditPill");
+  var creditText = document.getElementById("creditText");
+  var packsEl = document.getElementById("packs");
+  var packsMsg = document.getElementById("packsMsg");
+  var packsCta = document.getElementById("packsCta");
+  var errBanner = document.getElementById("errBanner");
+  var tzNote = document.getElementById("tzNote");
+  var dayGroups = document.getElementById("dayGroups");
+  var emptySlots = document.getElementById("emptySlots");
+
+  var sheetScrim = document.getElementById("sheetScrim");
+  var sheet = document.getElementById("sheet");
+  var sheetDay = document.getElementById("sheetDay");
+  var sheetTime = document.getElementById("sheetTime");
+  var sheetTitle = document.getElementById("sheetTitle");
+  var sheetErr = document.getElementById("sheetErr");
+  var confirmBtn = document.getElementById("confirmBtn");
+  var cancelSheetBtn = document.getElementById("cancelSheetBtn");
+
+  var succDay = document.getElementById("succDay");
+  var succTime = document.getElementById("succTime");
+  var gcalLink = document.getElementById("gcalLink");
+  var icsLink = document.getElementById("icsLink");
+
+  // ---- state ----
+  var athleteId = null;      // from /schedule; may stay null (server derives from token)
+  var creditsRemaining = 0;
+  var checkoutUrl = null;
+  var selectedSlot = null;   // the slot object the confirm sheet is for
+
+  // The browser's own IANA zone: every slot is rendered in THIS zone so the
+  // athlete sees their local time no matter where the coach authored it.
+  var localTz = "";
+  try { localTz = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) {}
+
+  // ---- safety helpers: treat every API value as hostile ----
+  function isNum(n) { return typeof n === "number" && isFinite(n); }
+  function asStr(v) { return typeof v === "string" ? v : ""; }
+  function httpsUrl(v) {
+    // Only accept an absolute https URL as an href. Anything else -> null.
+    if (typeof v !== "string") return null;
+    var s = v.trim();
+    return /^https:\/\//i.test(s) ? s : null;
+  }
+
+  function show(el) { el.style.display = ""; }
+  function hide(el) { el.style.display = "none"; }
+
+  function showBadLink(reason) {
+    hide(loadingEl); hide(bookingEl); hide(successEl);
+    if (reason === "accepted") {
+      badLinkTitle.textContent = "This link was already used.";
+      badLinkMsg.textContent = "Looks like this session was already booked. Ask your coach for a new link if you need another time.";
+    } else if (reason === "expired" || reason === "revoked") {
+      badLinkTitle.textContent = "This booking link has expired.";
+      badLinkMsg.textContent = "Ask your coach to text you a fresh booking link. It takes them one tap.";
+    } else {
+      badLinkTitle.textContent = "This link isn't working or has expired.";
+      badLinkMsg.textContent = "Ask your coach to text you a fresh booking link. It takes them one tap.";
+    }
+    show(badLinkEl);
+  }
+
+  // ---- date formatting in the athlete's local zone ----
+  function fmtOpts(o) {
+    if (localTz) o.timeZone = localTz;
+    return o;
+  }
+  function dayKey(d) {
+    // Stable per-local-calendar-day key for grouping.
+    try {
+      return new Intl.DateTimeFormat("en-CA", fmtOpts({ year: "numeric", month: "2-digit", day: "2-digit" })).format(d);
+    } catch (e) { return String(d.getTime()); }
+  }
+  function dayLabel(d) {
+    try {
+      return new Intl.DateTimeFormat("en-US", fmtOpts({ weekday: "long", month: "long", day: "numeric" })).format(d);
+    } catch (e) { return d.toDateString(); }
+  }
+  function timeLabel(d) {
+    try {
+      return new Intl.DateTimeFormat("en-US", fmtOpts({ hour: "numeric", minute: "2-digit" })).format(d);
+    } catch (e) { return d.toTimeString().slice(0, 5); }
+  }
+  function tzShortName() {
+    try {
+      var p = new Intl.DateTimeFormat("en-US", fmtOpts({ hour: "numeric", timeZoneName: "short" })).formatToParts(new Date());
+      for (var i = 0; i < p.length; i++) if (p[i].type === "timeZoneName") return p[i].value;
+    } catch (e) {}
+    return localTz;
+  }
+
+  // Google Calendar add-URL, built client-side from the returned slot (no
+  // server field to depend on). dates are UTC basic format YYYYMMDDTHHMMSSZ.
+  function gcalDate(iso) {
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return null;
+    return d.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+  }
+  function buildGcalUrl(slot) {
+    var s = gcalDate(slot.starts_at), e = gcalDate(slot.ends_at);
+    if (!s || !e) return null;
+    var title = asStr(slot.title) || "CoachTime session";
+    var params =
+      "action=TEMPLATE" +
+      "&text=" + encodeURIComponent(title) +
+      "&dates=" + s + "/" + e +
+      "&details=" + encodeURIComponent("Your CoachTime session. Your coach will go live at the session link.");
+    return "https://calendar.google.com/calendar/render?" + params;
+  }
+
+  // ---- render the booking view ----
+  function renderCredits() {
+    creditText.textContent = creditsRemaining === 1 ? "1 credit" : creditsRemaining + " credits";
+    creditPill.classList.toggle("zero", creditsRemaining <= 0);
+    show(creditPill);
+  }
+
+  function renderPacks() {
+    if (creditsRemaining > 0) { hide(packsEl); return; }
+    // Zero credits: friendly panel, no dead end. Show the checkout hint URL
+    // when the response carries one; otherwise just point them at their coach.
+    if (checkoutUrl) {
+      packsMsg.textContent = "You're out of session credits. Grab a session pack to book your next one.";
+      packsCta.setAttribute("href", checkoutUrl);
+      show(packsCta);
+    } else {
+      packsMsg.textContent = "You're out of session credits. Ask your coach about session packs and they'll get you set up.";
+      hide(packsCta);
+    }
+    show(packsEl);
+  }
+
+  function renderSlots(slots) {
+    // Clear
+    while (dayGroups.firstChild) dayGroups.removeChild(dayGroups.firstChild);
+
+    // Normalize + validate each slot, keep only future ones, sort by start.
+    var clean = [];
+    for (var i = 0; i < slots.length; i++) {
+      var raw = slots[i] || {};
+      var id = asStr(raw.id);
+      var startsAt = asStr(raw.starts_at);
+      var endsAt = asStr(raw.ends_at);
+      if (!id || !startsAt || !endsAt) continue;
+      var sd = new Date(startsAt);
+      if (isNaN(sd.getTime())) continue;
+      clean.push({
+        id: id,
+        starts_at: startsAt,
+        ends_at: endsAt,
+        timezone: asStr(raw.timezone),
+        title: asStr(raw.title),
+        _start: sd
+      });
+    }
+    clean.sort(function (a, b) { return a._start - b._start; });
+
+    if (!clean.length) {
+      hide(tzNote);
+      show(emptySlots);
+      return;
+    }
+    hide(emptySlots);
+    tzNote.textContent = "Times shown in your timezone" + (tzShortName() ? " (" + tzShortName() + ")" : "");
+    show(tzNote);
+
+    // Group by local calendar day, preserving sorted order.
+    var order = [];
+    var buckets = {};
+    for (var j = 0; j < clean.length; j++) {
+      var k = dayKey(clean[j]._start);
+      if (!buckets[k]) { buckets[k] = []; order.push(k); }
+      buckets[k].push(clean[j]);
+    }
+
+    for (var g = 0; g < order.length; g++) {
+      var key = order[g];
+      var group = buckets[key];
+
+      var dayEl = document.createElement("div");
+      dayEl.className = "day";
+
+      var lbl = document.createElement("p");
+      lbl.className = "day-label";
+      lbl.textContent = dayLabel(group[0]._start);
+      dayEl.appendChild(lbl);
+
+      var list = document.createElement("div");
+      list.className = "slots";
+
+      for (var s = 0; s < group.length; s++) {
+        list.appendChild(buildSlotButton(group[s]));
+      }
+      dayEl.appendChild(list);
+      dayGroups.appendChild(dayEl);
+    }
+  }
+
+  function buildSlotButton(slot) {
+    var btn = document.createElement("button");
+    btn.className = "slot";
+    btn.type = "button";
+
+    var timeWrap = document.createElement("span");
+    timeWrap.className = "slot-time";
+
+    var t = document.createElement("span");
+    t.textContent = timeLabel(slot._start) + " – " + timeLabel(new Date(slot.ends_at));
+    timeWrap.appendChild(t);
+
+    if (slot.title) {
+      var ti = document.createElement("span");
+      ti.className = "slot-title";
+      ti.textContent = slot.title;   // API text -> textContent only
+      timeWrap.appendChild(ti);
+    }
+    btn.appendChild(timeWrap);
+
+    var chev = document.createElement("span");
+    chev.className = "chev";
+    chev.setAttribute("aria-hidden", "true");
+    chev.textContent = "›";
+    btn.appendChild(chev);
+
+    btn.addEventListener("click", function () { openSheet(slot); });
+    return btn;
+  }
+
+  // ---- confirm sheet ----
+  function openSheet(slot) {
+    selectedSlot = slot;
+    sheetDay.textContent = dayLabel(slot._start);
+    sheetTime.textContent = timeLabel(slot._start) + " – " + timeLabel(new Date(slot.ends_at));
+    if (slot.title) { sheetTitle.textContent = slot.title; show(sheetTitle); } else { hide(sheetTitle); }
+    hide(sheetErr); sheetErr.textContent = "";
+    confirmBtn.disabled = false;
+    confirmBtn.textContent = creditsRemaining > 0 ? "Confirm booking" : "Continue";
+    show(sheetScrim);
+    sheet.style.display = "block";
+    // next frame so the transform transition runs
+    requestAnimationFrame(function () { sheet.classList.add("open"); });
+  }
+  function closeSheet() {
+    sheet.classList.remove("open");
+    hide(sheetScrim);
+    setTimeout(function () { sheet.style.display = "none"; }, 220);
+    selectedSlot = null;
+  }
+  cancelSheetBtn.addEventListener("click", closeSheet);
+  sheetScrim.addEventListener("click", closeSheet);
+
+  function showSheetErr(msg) {
+    sheetErr.textContent = msg;
+    show(sheetErr);
+  }
+
+  confirmBtn.addEventListener("click", function () {
+    if (!selectedSlot) return;
+    bookSlot(selectedSlot);
+  });
+
+  // ---- POST /book-slot ----
+  async function bookSlot(slot) {
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = "Booking…";
+    hide(sheetErr);
+    try {
+      // Server route: POST /schedule/:inviteToken/book { slotId }. The invite
+      // token in the URL IS the identity; the server resolves the athlete from it.
+      var resp = await fetch(
+        window.location.origin + "/schedule/" + encodeURIComponent(inviteToken) + "/book",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ slotId: slot.id })
+        }
+      );
+
+      var data = null;
+      try { data = await resp.json(); } catch (e) {}
+
+      if (resp.status === 402) {
+        // No credits: friendly panel, never a dead end. The server sends a
+        // checkoutHint { path, message }; that path is a POST checkout endpoint,
+        // not a link, so we surface the message rather than a bogus href.
+        var hintMsg = data && data.checkoutHint && asStr(data.checkoutHint.message);
+        closeSheet();
+        creditsRemaining = 0;
+        renderCredits();
+        renderPacks();
+        errBanner.textContent =
+          hintMsg || "You're out of session credits. Ask your coach about session packs to book this time.";
+        show(errBanner);
+        try { packsEl.scrollIntoView({ behavior: "smooth", block: "center" }); } catch (e) {}
+        return;
+      }
+      if (resp.status === 409) {
+        showSheetErr("That time was just taken. Pick another open slot.");
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = "Pick another time";
+        // Refresh the list so the taken slot drops off.
+        loadSchedule(true);
+        return;
+      }
+      if (!resp.ok || !data) {
+        showSheetErr((data && asStr(data.error)) || "Couldn't book that time. Try again in a moment.");
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = creditsRemaining > 0 ? "Confirm booking" : "Continue";
+        return;
+      }
+
+      // Success. Prefer the server's echoed slot, fall back to the one we sent.
+      if (isNum(data.credits_remaining)) creditsRemaining = data.credits_remaining;
+      var booked = (data.slot && typeof data.slot === "object") ? data.slot : slot;
+      // Normalize the fields the success view needs.
+      var confirmed = {
+        starts_at: asStr(booked.starts_at) || slot.starts_at,
+        ends_at: asStr(booked.ends_at) || slot.ends_at,
+        title: asStr(booked.title) || slot.title,
+        ics_url: httpsUrl(data.ics_url || data.icsUrl)
+      };
+      showSuccess(confirmed);
+    } catch (err) {
+      showSheetErr("Network hiccup. Check your connection and try again.");
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = creditsRemaining > 0 ? "Confirm booking" : "Continue";
+    }
+  }
+
+  function showSuccess(slot) {
+    closeSheet();
+    hide(loadingEl); hide(badLinkEl); hide(bookingEl);
+
+    var sd = new Date(slot.starts_at);
+    succDay.textContent = isNaN(sd.getTime()) ? "" : dayLabel(sd);
+    succTime.textContent = isNaN(sd.getTime())
+      ? ""
+      : timeLabel(sd) + " – " + timeLabel(new Date(slot.ends_at)) + (tzShortName() ? " " + tzShortName() : "");
+
+    var g = buildGcalUrl(slot);
+    if (g) { gcalLink.setAttribute("href", g); show(gcalLink); } else { hide(gcalLink); }
+
+    if (slot.ics_url) { icsLink.setAttribute("href", slot.ics_url); show(icsLink); } else { hide(icsLink); }
+
+    show(successEl);
+    window.scrollTo(0, 0);
+  }
+
+  // ---- GET /schedule/:inviteToken ----
+  async function loadSchedule(isRefresh) {
+    if (!isRefresh) { show(loadingEl); hide(bookingEl); hide(badLinkEl); }
+    try {
+      var resp = await fetch(window.location.origin + "/schedule/" + encodeURIComponent(inviteToken), {
+        method: "GET",
+        headers: { "Accept": "application/json" }
+      });
+
+      var data = null;
+      try { data = await resp.json(); } catch (e) {}
+
+      if (!resp.ok) {
+        // 404 covers both "not found" and "expired" (server does not distinguish),
+        // so the generic honest error state covers all of it.
+        showBadLink("");
+        return;
+      }
+      if (!data || typeof data !== "object") { showBadLink(""); return; }
+
+      // Coach heading
+      var coachName = asStr(data.coachName) || (data.coach && asStr(data.coach.name));
+      coachHeading.textContent = coachName ? ("Book with " + coachName) : "Book a session";
+
+      // Athlete id (identity stays the token; the server echoes it as a convenience).
+      athleteId = data.athleteId != null ? asStr(data.athleteId) : null;
+
+      // Credits: the server sends a plain integer.
+      var creds = isNum(data.credits)
+        ? data.credits
+        : (data.credits && isNum(data.credits.remaining) ? data.credits.remaining : 0);
+      creditsRemaining = Math.max(0, Math.floor(creds));
+
+      // /schedule carries no checkout URL; the zero-credit hint arrives on the
+      // 402 from a book attempt (checkoutHint). Leave it null here.
+      checkoutUrl = null;
+
+      var slots = Array.isArray(data.slots) ? data.slots : [];
+
+      hide(loadingEl); hide(badLinkEl); hide(errBanner);
+      show(bookingEl);
+      renderCredits();
+      renderPacks();
+      renderSlots(slots);
+    } catch (err) {
+      showBadLink("");
+    }
+  }
+
+  // ---- boot ----
+  if (!UUID_RE.test(inviteToken)) {
+    showBadLink("");
+  } else {
+    loadSchedule(false);
+  }
+})();
+</script>
+</body>
+</html>

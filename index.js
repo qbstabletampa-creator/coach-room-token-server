@@ -17,6 +17,7 @@ const { AccessToken, RoomServiceClient, DataPacket_Kind } = require("livekit-ser
 const { notify } = require("./lib/notify");
 const { stripeWebhookHandler } = require("./lib/stripe-webhook");
 const { createSessionHandler } = require("./lib/checkout");
+const { buildSchedulingHandlers } = require("./lib/scheduling");
 
 const PORT = process.env.PORT || 3130;
 const LIVEKIT_URL = process.env.LIVEKIT_URL;
@@ -58,6 +59,12 @@ function envFlag(name) {
 }
 const CHECKOUT_ENABLED = envFlag("CHECKOUT_ENABLED");
 const STRIPE_WEBHOOK_ENABLED = envFlag("STRIPE_WEBHOOK_ENABLED");
+// SCHEDULING_ENABLED gates the D12 native scheduling routes (schedule view,
+// book, cancel, coach slot generation). OFF by default: inert in production
+// until CJ flips the flag. Same additive, guarded posture as the payments flags.
+// The same flag also gates the athlete booking page (GET /book/:inviteToken)
+// added below, so book.html and its /schedule data source flip on together.
+const SCHEDULING_ENABLED = envFlag("SCHEDULING_ENABLED");
 
 if (!LIVEKIT_API_KEY || !LIVEKIT_API_SECRET || !LIVEKIT_URL) {
   console.error(
@@ -598,6 +605,25 @@ app.get("/web/:id", (req, res) => {
   }
   res.sendFile(path.join(__dirname, "public", "join.html"));
 });
+
+// GET /book/:inviteToken — the athlete booking page (no-signup: the invite
+// token in the path IS the athlete's identity). Serves the static book.html and
+// lets it parse + validate the token client-side, so nothing dynamic is
+// interpolated server-side here (same XSS-safe pattern as /web/:id). Flag-guarded
+// OFF by default: when SCHEDULING_ENABLED is unset this route is never registered,
+// so GET /book/:token falls through to a 404. book.html loads its data from the
+// server cluster's GET /schedule/:inviteToken (behind the same flag).
+if (SCHEDULING_ENABLED) {
+  app.get("/book/:inviteToken", (req, res) => {
+    const token = req.params.inviteToken || "";
+    // Booking invites are UUID tokens (booking_invites.token). Reject anything
+    // else with the same friendly page /web uses for a bad room link.
+    if (!UUID_RE.test(token)) {
+      return res.status(400).type("html").send(invalidRoomPage());
+    }
+    res.sendFile(path.join(__dirname, "public", "book.html"));
+  });
+}
 
 function invalidRoomPage() {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8" />
@@ -1268,6 +1294,41 @@ if (CHECKOUT_ENABLED) {
   app.post("/checkout/create-session", checkoutLimiter, createSession);
 }
 
+// ---- D12 scheduling routes (additive, env-flag guarded OFF by default) ------
+// Three athlete-facing routes keyed by a booking_invites token (no signup wall,
+// the invite token IS the athlete's identity) plus one coach-authed slot
+// generator. When SCHEDULING_ENABLED is unset none of these register at all.
+if (SCHEDULING_ENABLED) {
+  const scheduleReadLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 60, // reading the picker is cheap; an athlete may refresh a few times.
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many requests, slow down." },
+  });
+  const scheduleWriteLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 20, // book/cancel are money-adjacent; tighter cap.
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many booking attempts, slow down." },
+  });
+  const slotGenLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 10, // slot generation is a bulk write; a coach runs it rarely.
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many generation requests, slow down." },
+  });
+
+  const scheduling = buildSchedulingHandlers({ requireSupabaseUser, notify });
+
+  app.get("/schedule/:inviteToken", scheduleReadLimiter, scheduling.getSchedule);
+  app.post("/schedule/:inviteToken/book", scheduleWriteLimiter, scheduling.bookSlot);
+  app.post("/schedule/:inviteToken/cancel", scheduleWriteLimiter, scheduling.cancelBooking);
+  app.post("/coach/slots/generate", slotGenLimiter, scheduling.generateSlots);
+}
+
 // Only bind the port when run directly (node index.js). When required by a test
 // (require.main !== module) we export the pure helpers for unit testing and skip
 // listen(), so tests never open a socket or need live LiveKit/Supabase creds.
@@ -1289,4 +1350,6 @@ module.exports = {
   // Payments backbone (additive). Exported for unit tests + future callers.
   notify,
   getPackage,
+  // Scheduling backbone (additive). Exported for unit tests + future callers.
+  buildSchedulingHandlers,
 };
