@@ -183,6 +183,25 @@
     border: 1px solid rgba(212,195,106,0.3);
   }
 
+  /* ---------- Screen share (coach shares their device screen) ----------
+     Same layout as co-watch: the shared screen fills the stage, the coach
+     camera shrinks to the identical lower-left PiP. Additive and inert unless
+     a screen-share track is subscribed (never in a camera-only call). */
+  #shareVideo {
+    position: absolute; inset: 0; display: none;
+    width: 100%; height: 100%; object-fit: contain; background: #000;
+    z-index: 3;
+  }
+  #remoteWrap.sharing #shareVideo { display: block; }
+  #remoteWrap.sharing #remoteVideo {
+    position: absolute; left: 16px;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 96px);
+    width: 108px; height: 152px; object-fit: cover;
+    border-radius: var(--radius); z-index: 4;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.5);
+    border: 1px solid rgba(212,195,106,0.3);
+  }
+
   /* ---------- Annotation (telestration) overlay ---------- */
   #annoOverlay {
     position: absolute; inset: 0; display: none;
@@ -307,6 +326,10 @@
 
       <!-- Co-watch film stage: a direct <video> or an embed <iframe> goes here. -->
       <div id="cowatch" aria-hidden="true"></div>
+
+      <!-- Screen-share stage: the coach's shared device screen fills here while
+           they present. Hidden (and never attached) in a camera-only call. -->
+      <video id="shareVideo" autoplay playsinline aria-hidden="true"></video>
 
       <!-- Freeze scrim dims the live frame under the strokes. -->
       <div id="freezeScrim" aria-hidden="true"></div>
@@ -433,6 +456,7 @@
   var scriptBtn = document.getElementById("scriptBtn");
   var remoteWrap = document.getElementById("remoteWrap");
   var cowatch = document.getElementById("cowatch");
+  var shareVideo = document.getElementById("shareVideo");
   var freezeScrim = document.getElementById("freezeScrim");
   var annoOverlay = document.getElementById("annoOverlay");
   var annoSvg = document.getElementById("annoSvg");
@@ -576,9 +600,19 @@
   // Attach a single remote track. Idempotent: LiveKit's attach() reuses the
   // element if already attached, so calling this from both TrackSubscribed and
   // bindRemote is safe and order-independent.
-  function attachRemoteTrack(track) {
+  function attachRemoteTrack(track, pub) {
     if (!track) return;
     if (track.kind === Track.Kind.Video) {
+      // SOURCE-AWARE (additive). A screen-share video takes over the stage and
+      // demotes the coach camera to the PiP; a camera video keeps the EXACT
+      // original path below. In a camera-only call (every call today) pub.source
+      // is never ScreenShare, so this branch never runs and behavior is
+      // unchanged. pub can be undefined on older call paths — treat that as a
+      // camera track (the original behavior).
+      if (pub && pub.source === Track.Source.ScreenShare) {
+        beginScreenShare(track);
+        return;
+      }
       track.attach(remoteVideo);
       remoteVideo.playsInline = true;
       remoteVideo.style.display = "block";
@@ -599,9 +633,16 @@
     }
   }
 
-  function detachRemoteTrack(track) {
+  function detachRemoteTrack(track, pub) {
     if (!track) return;
     if (track.kind === Track.Kind.Video) {
+      // Screen-share video going away: tear down the share stage and restore
+      // the camera. Additive — a camera track takes the EXACT original path.
+      if (pub && pub.source === Track.Source.ScreenShare) {
+        try { track.detach(shareVideo); } catch (e) {}
+        endScreenShare();
+        return;
+      }
       track.detach(remoteVideo);
       remoteVideo.style.display = "none";
     } else if (track.kind === Track.Kind.Audio) {
@@ -614,14 +655,38 @@
     }
   }
 
+  // ---- Screen share (coach shares their device screen) ----------------------
+  // The shared screen owns the stage and the coach camera drops to the PiP,
+  // mirroring co-watch. Annotation is BAKED into the shared pixels by the
+  // coach's ReplayKit capture, so while a share is active we SUPPRESS painting
+  // inbound vector strokes (renderShapes early-returns) but keep receiving them
+  // so the protocol is undisturbed; painting resumes when the share ends.
+  function beginScreenShare(track) {
+    screenShareActive = true;
+    try { track.attach(shareVideo); } catch (e) {}
+    shareVideo.playsInline = true;
+    remoteWrap.classList.add("sharing");
+    renderShapes(); // clears any camera-frame ink; won't repaint while sharing
+  }
+
+  function endScreenShare() {
+    if (!screenShareActive) return;
+    screenShareActive = false;
+    remoteWrap.classList.remove("sharing");
+    try { shareVideo.pause(); } catch (e) {}
+    // Drop any leftover stream so the element is clean for the next share.
+    try { if (shareVideo.srcObject) shareVideo.srcObject = null; } catch (e) {}
+    renderShapes(); // repaint the strokes we held back while sharing
+  }
+
   function wireRoomEvents(r) {
     r.on(RoomEvent.TrackSubscribed, function (track, pub, participant) {
-      attachRemoteTrack(track);
+      attachRemoteTrack(track, pub);
       refreshRemoteState();
     });
 
-    r.on(RoomEvent.TrackUnsubscribed, function (track) {
-      detachRemoteTrack(track);
+    r.on(RoomEvent.TrackUnsubscribed, function (track, pub) {
+      detachRemoteTrack(track, pub);
       refreshRemoteState();
     });
 
@@ -634,6 +699,8 @@
       bindRemote(p); refreshRemoteState();
     });
     r.on(RoomEvent.ParticipantDisconnected, function () {
+      // If they left mid-share, restore the camera stage before hiding it.
+      endScreenShare();
       remoteVideo.style.display = "none";
       refreshRemoteState();
     });
@@ -665,7 +732,7 @@
     // Attach any already-subscribed tracks (covers late local join + late
     // remote publish where the track may already be live).
     participant.trackPublications.forEach(function (pub) {
-      if (pub.track) attachRemoteTrack(pub.track);
+      if (pub.track) attachRemoteTrack(pub.track, pub);
       // Make sure we're subscribed so tracks published later still fire
       // TrackSubscribed. autoSubscribe is on by default, but be explicit.
       try { if (pub.setSubscribed) pub.setSubscribed(true); } catch (e) {}
@@ -709,6 +776,7 @@
   var liveNotes = [];             // NoteWire objects from the coach
   var liveDrills = [];            // DrillWire objects from the coach
   var cowatchActive = false;
+  var screenShareActive = false; // a coach screen-share track owns the stage
 
   function resetCallState() {
     callMode = "face";
@@ -717,6 +785,7 @@
     liveNotes = [];
     liveDrills = [];
     cowatchActive = false;
+    endScreenShare();
     stopClipRecording("reset");
     renderShapes();
     renderScript();
@@ -947,6 +1016,13 @@
   }
   function renderShapes() {
     while (annoSvg.firstChild) annoSvg.removeChild(annoSvg.firstChild);
+    // BAKED-ANNOTATION SUPPRESSION: while a coach screen-share owns the stage,
+    // the coach's ink is already in the shared pixels (ReplayKit captured it).
+    // Painting the same strokes as vectors would double-draw them onto the
+    // wrong frame, so we hold off until the share ends. The shapes array stays
+    // intact (protocol/state undisturbed); the next renderShapes after
+    // endScreenShare repaints them. No effect in a camera-only call.
+    if (screenShareActive) { annoOverlay.style.display = "none"; return; }
     var show = shapes.length > 0;
     annoOverlay.style.display = show ? "block" : "none";
     if (!show) return;
