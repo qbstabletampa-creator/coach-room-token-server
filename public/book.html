@@ -66,6 +66,33 @@
     padding: 11px 18px; border-radius: var(--radius);
   }
 
+  /* ---------- Session type step ---------- */
+  .type-step { margin-top: 24px; }
+  .type-step .step-k {
+    font-size: 13px; font-weight: 600; color: var(--gold);
+    text-transform: uppercase; letter-spacing: 1px; margin: 0 0 12px;
+  }
+  .types { display: flex; flex-direction: column; gap: 10px; }
+  .type-card {
+    width: 100%; text-align: left;
+    background: var(--surface); border: 1px solid var(--line);
+    color: var(--text); border-radius: var(--radius); padding: 15px 16px;
+    display: flex; flex-direction: column; gap: 4px;
+    transition: border-color .15s ease, background .15s ease;
+  }
+  .type-card:hover { border-color: rgba(212,195,106,0.6); background: var(--surface-2); }
+  .type-card.selected { border-color: var(--gold); background: var(--surface-2); }
+  .type-top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .type-name { font-size: 15.5px; font-weight: 700; }
+  .type-price { font-size: 14px; font-weight: 700; color: var(--gold); flex: 0 0 auto; }
+  .type-sub { font-size: 12.5px; color: var(--muted); font-weight: 500; }
+  .type-desc { font-size: 13px; color: var(--muted); line-height: 1.5; margin-top: 2px; }
+  .type-skip {
+    width: 100%; background: none; color: var(--muted); border: 0;
+    font-size: 13.5px; font-weight: 600; padding: 12px; margin-top: 8px;
+  }
+  .type-skip:hover { color: var(--text); }
+
   /* ---------- Timezone note ---------- */
   .tz-note {
     margin: 26px 0 12px; font-size: 12.5px; color: var(--muted);
@@ -224,12 +251,22 @@
 
       <div id="errBanner" class="err-banner" style="display:none"></div>
 
-      <p id="tzNote" class="tz-note" style="display:none"></p>
+      <!-- Storefront (0013): optional type step BEFORE times, shown only when the
+           coach has active session types. No types -> flow identical to before. -->
+      <div id="typeStep" class="type-step" style="display:none">
+        <p class="step-k">What are you booking?</p>
+        <div id="typeList" class="types"></div>
+        <button id="typeSkip" class="type-skip" type="button">Skip, just show me times</button>
+      </div>
 
-      <div id="dayGroups"></div>
+      <div id="timesArea" style="display:none">
+        <p id="tzNote" class="tz-note" style="display:none"></p>
 
-      <div id="emptySlots" class="empty-slots" style="display:none">
-        No open times right now. Your coach adds new slots often, check back soon or ask them to open one.
+        <div id="dayGroups"></div>
+
+        <div id="emptySlots" class="empty-slots" style="display:none">
+          No open times right now. Your coach adds new slots often, check back soon or ask them to open one.
+        </div>
       </div>
     </div>
 
@@ -337,6 +374,10 @@
   var packsMsg = document.getElementById("packsMsg");
   var packsCta = document.getElementById("packsCta");
   var errBanner = document.getElementById("errBanner");
+  var typeStep = document.getElementById("typeStep");
+  var typeList = document.getElementById("typeList");
+  var typeSkip = document.getElementById("typeSkip");
+  var timesArea = document.getElementById("timesArea");
   var tzNote = document.getElementById("tzNote");
   var dayGroups = document.getElementById("dayGroups");
   var emptySlots = document.getElementById("emptySlots");
@@ -362,6 +403,8 @@
   var creditsRemaining = 0;
   var checkoutUrl = null;
   var selectedSlot = null;   // the slot object the confirm sheet is for
+  var selectedTypeId = null; // session type picked in the type step (optional)
+  var selectedTypeName = "";
 
   // The browser's own IANA zone: every slot is rendered in THIS zone so the
   // athlete sees their local time no matter where the coach authored it.
@@ -466,6 +509,57 @@
     show(packsEl);
   }
 
+  function money(cents) {
+    if (!isNum(cents)) return "";
+    if (cents === 0) return "Free";
+    var d = cents / 100;
+    return "$" + (d % 1 === 0 ? d.toFixed(0) : d.toFixed(2));
+  }
+
+  // Storefront (0013): render the optional type step. When the coach has active
+  // types the athlete picks one (or skips) BEFORE seeing times; the chosen type
+  // rides the book POST. No types -> the step stays hidden and times show at once.
+  function renderTypeStep(types) {
+    while (typeList.firstChild) typeList.removeChild(typeList.firstChild);
+    if (!types.length) {
+      hide(typeStep);
+      show(timesArea); // no types: identical to before storefront
+      return;
+    }
+    for (var i = 0; i < types.length; i++) {
+      (function (t) {
+        var id = asStr(t.id); if (!id) return;
+        var card = document.createElement("button");
+        card.className = "type-card"; card.type = "button";
+        var top = document.createElement("div"); top.className = "type-top";
+        var name = document.createElement("span"); name.className = "type-name"; name.textContent = asStr(t.name) || "Session";
+        var price = document.createElement("span"); price.className = "type-price"; price.textContent = money(t.price_cents);
+        top.appendChild(name); top.appendChild(price); card.appendChild(top);
+        if (isNum(t.duration_min)) { var sub = document.createElement("div"); sub.className = "type-sub"; sub.textContent = t.duration_min + " min"; card.appendChild(sub); }
+        if (asStr(t.description)) { var desc = document.createElement("div"); desc.className = "type-desc"; desc.textContent = asStr(t.description); card.appendChild(desc); }
+        card._typeId = id; card._typeName = asStr(t.name) || "Session";
+        card.addEventListener("click", function () { chooseType(id, card._typeName); });
+        typeList.appendChild(card);
+      })(types[i]);
+    }
+    show(typeStep);
+    hide(timesArea); // wait for a choice (or skip)
+  }
+  function chooseType(id, name) {
+    selectedTypeId = id; selectedTypeName = name;
+    var cards = typeList.querySelectorAll(".type-card");
+    for (var i = 0; i < cards.length; i++) cards[i].classList.toggle("selected", cards[i]._typeId === id);
+    show(timesArea);
+    try { timesArea.scrollIntoView({ behavior: "smooth", block: "start" }); } catch (e) {}
+  }
+  typeSkip.addEventListener("click", function () {
+    selectedTypeId = null; selectedTypeName = "";
+    var cards = typeList.querySelectorAll(".type-card");
+    for (var i = 0; i < cards.length; i++) cards[i].classList.remove("selected");
+    show(timesArea);
+    try { timesArea.scrollIntoView({ behavior: "smooth", block: "start" }); } catch (e) {}
+  });
+
   function renderSlots(slots) {
     // Clear
     while (dayGroups.firstChild) dayGroups.removeChild(dayGroups.firstChild);
@@ -567,7 +661,9 @@
     selectedSlot = slot;
     sheetDay.textContent = dayLabel(slot._start);
     sheetTime.textContent = timeLabel(slot._start) + " – " + timeLabel(new Date(slot.ends_at));
-    if (slot.title) { sheetTitle.textContent = slot.title; show(sheetTitle); } else { hide(sheetTitle); }
+    // Show the picked session type when there is one, else the slot's own title.
+    var sheetLabel = selectedTypeName || slot.title;
+    if (sheetLabel) { sheetTitle.textContent = sheetLabel; show(sheetTitle); } else { hide(sheetTitle); }
     hide(sheetErr); sheetErr.textContent = "";
     confirmBtn.disabled = false;
     confirmBtn.textContent = creditsRemaining > 0 ? "Confirm booking" : "Continue";
@@ -608,7 +704,7 @@
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ slotId: slot.id })
+          body: JSON.stringify({ slotId: slot.id, session_type_id: selectedTypeId })
         }
       );
 
@@ -728,11 +824,16 @@
       checkoutUrl = null;
 
       var slots = Array.isArray(data.slots) ? data.slots : [];
+      var sessionTypes = Array.isArray(data.session_types) ? data.session_types : [];
 
       hide(loadingEl); hide(badLinkEl); hide(errBanner);
       show(bookingEl);
       renderCredits();
       renderPacks();
+      // On a refresh (after a taken-slot 409) keep the times visible; only reset
+      // the type gate on a fresh load.
+      if (!isRefresh) renderTypeStep(sessionTypes);
+      else show(timesArea);
       renderSlots(slots);
     } catch (err) {
       showBadLink("");

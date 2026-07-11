@@ -18,6 +18,7 @@ const { notify } = require("./lib/notify");
 const { stripeWebhookHandler } = require("./lib/stripe-webhook");
 const { createSessionHandler } = require("./lib/checkout");
 const { buildSchedulingHandlers } = require("./lib/scheduling");
+const { buildStorefrontHandlers } = require("./lib/storefront");
 const { buildAccountDeleteHandler } = require("./lib/account-delete");
 
 const PORT = process.env.PORT || 3130;
@@ -1433,6 +1434,16 @@ if (SCHEDULING_ENABLED) {
   app.post("/send-invite", scheduleWriteLimiter, scheduling.sendInvite);
   app.post("/coach/bookings/cancel", scheduleWriteLimiter, scheduling.coachCancelBooking);
 
+  // ---- D-storefront: public coach page + zero-friction guest booking --------
+  // The public discovery lane (SoloCoach steal #1). Registered AFTER the literal
+  // /coach/slots and /coach/bookings routes above so the /coach/:slug param route
+  // never shadows them (Express matches in registration order). Guest booking
+  // reuses the scheduling write limiter (money-adjacent posture, tight cap).
+  const storefront = buildStorefrontHandlers({ notify });
+  app.get("/coach/:slug", scheduleReadLimiter, storefront.getCoachPage);
+  app.get("/coach/:slug/data", scheduleReadLimiter, storefront.getCoachData);
+  app.post("/coach/:slug/book-guest", scheduleWriteLimiter, storefront.bookGuest);
+
   // Reminders cron endpoint. Flag-gated with the rest of scheduling; the
   // handler itself enforces the cron secret. Logic lives in lib/reminders.js.
   const { buildRemindersHandler } = require("./lib/reminders");
@@ -1462,6 +1473,8 @@ module.exports = {
   getPackage,
   // Scheduling backbone (additive). Exported for unit tests + future callers.
   buildSchedulingHandlers,
+  // Storefront backbone (additive). Exported for unit tests + future callers.
+  buildStorefrontHandlers,
   // Account deletion (D1). Exported for unit tests + future callers.
   buildAccountDeleteHandler,
 };
