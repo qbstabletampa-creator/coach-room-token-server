@@ -1258,6 +1258,86 @@ app.post(
   buildAccountDeleteHandler({ requireSupabaseUser }),
 );
 
+// ---- push token registration (D13 notify backbone) --------------------------
+// A signed-in user (coach or claimed athlete) registers this device's Expo push
+// token after an IN-CONTEXT permission grant (never at launch — steal inventory
+// little-soles push.ts). NOT flag-gated, by contract: a user owns their own
+// device tokens, and a registered token is inert until something calls notify()
+// to fan a push out. The token binds to the VERIFIED caller (never a body id).
+// Upsert on the token's UNIQUE constraint so a device re-registering just
+// refreshes user_id/platform/updated_at. A malformed token is a 200 no-op (the
+// client should never be able to turn a best-effort background register into a
+// hard error).
+const pushTokenLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30, // a device registers once per grant + the odd refresh; generous.
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many token registrations, slow down." },
+});
+
+// Expo push tokens look like ExponentPushToken[xxxx] (or the newer ExpoPushToken
+// [xxxx]). Anything else is not a token we can push to -> no-op.
+const EXPO_PUSH_TOKEN_RE = /^Expo(nent)?PushToken\[[^\]]+\]$/;
+const PUSH_PLATFORMS = new Set(["ios", "android", "web"]);
+
+app.post("/register-push-token", pushTokenLimiter, async (req, res) => {
+  try {
+    if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+      return res.status(503).json({ error: "push not configured" });
+    }
+
+    // Authed: the token is bound to the verified caller, never a body-supplied id.
+    const authd = await requireSupabaseUser(req);
+    if (authd.error) {
+      return res.status(authd.status || 401).json({ error: authd.error });
+    }
+    const userId = authd.user.id;
+
+    const body = req.body || {};
+    const token = typeof body.token === "string" ? body.token.trim() : "";
+    let platform =
+      typeof body.platform === "string" ? body.platform.trim().toLowerCase() : "ios";
+    if (!PUSH_PLATFORMS.has(platform)) platform = "ios";
+
+    // Malformed token -> 200 no-op (contract). Nothing is written.
+    if (!EXPO_PUSH_TOKEN_RE.test(token)) {
+      return res.status(200).json({ ok: true });
+    }
+
+    // Upsert on the token's UNIQUE constraint: a device re-registering refreshes
+    // its row instead of erroring. PostgREST upsert = POST with
+    // Prefer: resolution=merge-duplicates + on_conflict=token.
+    const resp = await fetch(
+      `${SUPABASE_URL}/rest/v1/push_tokens?on_conflict=token`,
+      {
+        method: "POST",
+        headers: {
+          apikey: SUPABASE_SERVICE_KEY,
+          authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+          "content-type": "application/json",
+          prefer: "resolution=merge-duplicates,return=minimal",
+        },
+        body: JSON.stringify({
+          user_id: userId,
+          token,
+          platform,
+          updated_at: new Date().toISOString(),
+        }),
+      },
+    );
+    if (!resp.ok) {
+      const detail = await resp.text().catch(() => "");
+      console.error("[token-server] push token upsert failed:", resp.status, detail);
+      return res.status(502).json({ error: "could not register token" });
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("[token-server] register-push-token error:", err);
+    res.status(500).json({ error: "register failed" });
+  }
+});
+
 // ---- payments backbone routes (additive, env-flag guarded OFF by default) ---
 // Nothing below changes any existing route. When the flags are unset (the
 // production default today) none of these routes are registered at all.
