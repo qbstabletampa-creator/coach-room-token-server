@@ -323,3 +323,312 @@ test("POST /checkout/create-session returns 401 without a JWT", async () => {
     server.close();
   }
 });
+
+// ===========================================================================
+// D19 REAL WEBHOOK PROVISIONING (checkout.session.completed)
+// ===========================================================================
+//
+// Shared fetch mock (same shape as scheduling-endpoints.test.js): routes Supabase
+// REST by URL + method, records every call. Unmatched returns ok/empty so notify's
+// dedupe GET + notifications insert + push_tokens lookup are absorbed.
+function installFetchMock(routes) {
+  const realFetch = global.fetch;
+  const calls = [];
+  global.fetch = async (url, opts = {}) => {
+    const u = String(url);
+    const method = (opts.method || "GET").toUpperCase();
+    calls.push({ u, method, body: opts.body ? JSON.parse(opts.body) : null });
+    for (const r of routes) {
+      if (r.test(u, method)) return r.reply(u, method, opts);
+    }
+    return { ok: true, status: 200, json: async () => [], text: async () => "" };
+  };
+  return {
+    calls,
+    restore() {
+      global.fetch = realFetch;
+    },
+  };
+}
+function okr(json, status = 200) {
+  return { ok: status < 400, status, json: async () => json, text: async () => "" };
+}
+
+const PKG_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const COACH_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const ATHLETE_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const SESSION_ID = "cs_test_dddddddd";
+
+// Build a signed checkout.session.completed delivery for the given session object.
+function completedEvent(port, sessionObj) {
+  const body = JSON.stringify({
+    type: "checkout.session.completed",
+    data: { object: sessionObj },
+  });
+  const sig = stripeSig(body, "whsec_testsecret");
+  return request(port, {
+    method: "POST",
+    path: "/stripe/webhook",
+    headers: { "content-type": "application/json", "stripe-signature": sig },
+    body,
+  });
+}
+
+test("webhook HARD GATE: a handled event without STRIPE_WEBHOOK_SECRET refuses to provision (503)", async () => {
+  delete process.env.STRIPE_WEBHOOK_SECRET; // unverified: must not provision.
+  const { server, port } = await startServer();
+  const mock = installFetchMock([]);
+  try {
+    const body = JSON.stringify({
+      type: "checkout.session.completed",
+      data: { object: { id: SESSION_ID, metadata: { packageId: PKG_ID } } },
+    });
+    const res = await request(port, {
+      method: "POST",
+      path: "/stripe/webhook",
+      headers: { "content-type": "application/json" },
+      body,
+    });
+    assert.strictEqual(res.status, 503, "503 preserves a paid event for redelivery once the secret is set");
+    assert.ok(
+      !mock.calls.some((c) => c.u.includes("/package_purchases")),
+      "nothing is provisioned on an unverified event",
+    );
+    assert.ok(
+      !mock.calls.some((c) => c.u.includes("/athlete_claims")),
+      "no account is provisioned on an unverified event",
+    );
+  } finally {
+    mock.restore();
+    server.close();
+  }
+});
+
+test("webhook provisions credits from the package and mints a claim for a NEW buyer email", async () => {
+  process.env.STRIPE_WEBHOOK_SECRET = "whsec_testsecret";
+  const { server, port } = await startServer();
+  const mock = installFetchMock([
+    {
+      // idempotency pre-check: no prior purchase for this session.
+      test: (u, m) =>
+        u.includes("/package_purchases") && u.includes("stripe_session_id=eq.") && m === "GET",
+      reply: () => okr([]),
+    },
+    {
+      // package lookup drives credits/coach/expiry.
+      test: (u, m) => u.includes("/packages") && m === "GET",
+      reply: () => okr([{ id: PKG_ID, coach_id: COACH_ID, credits: 5, expires_days: 30 }]),
+    },
+    {
+      // no athlete matches the buyer email in this tenant.
+      test: (u, m) => u.includes("/athletes") && m === "GET",
+      reply: () => okr([]),
+    },
+    {
+      // create the athlete card from the email.
+      test: (u, m) => u.includes("/athletes") && m === "POST",
+      reply: () => okr([{ id: ATHLETE_ID }]),
+    },
+    {
+      // no reusable claim -> mint.
+      test: (u, m) => u.includes("/athlete_claims") && m === "GET",
+      reply: () => okr([]),
+    },
+    {
+      test: (u, m) => u.includes("/athlete_claims") && m === "POST",
+      reply: () => okr([{ token: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" }]),
+    },
+    {
+      // purchase insert.
+      test: (u, m) => u.includes("/package_purchases") && m === "POST",
+      reply: () => okr([{ id: "ffffffff-ffff-4fff-8fff-ffffffffffff" }], 201),
+    },
+  ]);
+  try {
+    const res = await completedEvent(port, {
+      id: SESSION_ID,
+      amount_total: 5000,
+      metadata: { packageId: PKG_ID },
+      customer_details: { email: "New.Buyer@Example.com", name: "New Buyer" },
+    });
+    assert.strictEqual(res.status, 200);
+
+    // The athlete card was created for THIS coach from the (lowercased) email.
+    const athIns = mock.calls.find((c) => c.u.includes("/athletes") && c.method === "POST");
+    assert.ok(athIns, "an athlete card was created (buy-first funnel)");
+    assert.strictEqual(athIns.body.coach_id, COACH_ID);
+    assert.strictEqual(athIns.body.parent_email, "new.buyer@example.com", "email normalized to lowercase");
+
+    // A claim was minted (the account offer, NOT a Supabase auth user).
+    const claimIns = mock.calls.find((c) => c.u.includes("/athlete_claims") && c.method === "POST");
+    assert.ok(claimIns, "a claim row was minted");
+    assert.strictEqual(claimIns.body.athlete_id, ATHLETE_ID);
+    assert.ok(
+      !mock.calls.some((c) => c.u.includes("/auth/v1/") && c.method === "POST"),
+      "no Supabase auth user is created directly — the claim tap is the magic link",
+    );
+
+    // The purchase carried package-derived credits + expiry + idempotency key.
+    const purIns = mock.calls.find((c) => c.u.includes("/package_purchases") && c.method === "POST");
+    assert.ok(purIns, "the purchase was inserted");
+    assert.strictEqual(purIns.body.credits_total, 5, "credits come from the package server-side");
+    assert.strictEqual(purIns.body.credits_remaining, 5);
+    assert.strictEqual(purIns.body.stripe_session_id, SESSION_ID, "keyed on the session id for idempotency");
+    assert.strictEqual(purIns.body.athlete_id, ATHLETE_ID, "purchase linked to the new athlete");
+    assert.strictEqual(purIns.body.source, "checkout");
+    assert.ok(purIns.body.expires_at, "expires_at set from package.expires_days");
+
+    // notify() fired payment.confirmed keyed on the session id, carrying the claim link.
+    const note = mock.calls.find(
+      (c) => c.u.includes("/rest/v1/notifications") && c.method === "POST",
+    );
+    assert.ok(note, "a payment.confirmed notification row was written");
+    assert.strictEqual(note.body.type, "payment.confirmed");
+    assert.strictEqual(note.body.dedupe_key, SESSION_ID);
+    assert.ok(
+      note.body.data && String(note.body.data.claimUrl).includes("/claim/"),
+      "the claim link rides the payment.confirmed notification",
+    );
+  } finally {
+    delete process.env.STRIPE_WEBHOOK_SECRET;
+    mock.restore();
+    server.close();
+  }
+});
+
+test("webhook links the purchase to a MATCHED athlete, minting a claim only when unclaimed", async () => {
+  process.env.STRIPE_WEBHOOK_SECRET = "whsec_testsecret";
+  const { server, port } = await startServer();
+  const mock = installFetchMock([
+    {
+      test: (u, m) =>
+        u.includes("/package_purchases") && u.includes("stripe_session_id=eq.") && m === "GET",
+      reply: () => okr([]),
+    },
+    {
+      test: (u, m) => u.includes("/packages") && m === "GET",
+      reply: () => okr([{ id: PKG_ID, coach_id: COACH_ID, credits: 10, expires_days: null }]),
+    },
+    {
+      // an existing UNCLAIMED athlete matches the buyer email.
+      test: (u, m) => u.includes("/athletes") && m === "GET",
+      reply: () => okr([{ id: ATHLETE_ID, user_id: null }]),
+    },
+    {
+      test: (u, m) => u.includes("/athlete_claims") && m === "GET",
+      reply: () => okr([]),
+    },
+    {
+      test: (u, m) => u.includes("/athlete_claims") && m === "POST",
+      reply: () => okr([{ token: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" }]),
+    },
+    {
+      test: (u, m) => u.includes("/package_purchases") && m === "POST",
+      reply: () => okr([{ id: "ffffffff-ffff-4fff-8fff-ffffffffffff" }], 201),
+    },
+  ]);
+  try {
+    const res = await completedEvent(port, {
+      id: SESSION_ID,
+      amount_total: 9000,
+      metadata: { packageId: PKG_ID },
+      customer_details: { email: "match@example.com" },
+    });
+    assert.strictEqual(res.status, 200);
+    // Matched -> no athlete created, purchase linked, claim minted (unclaimed).
+    assert.ok(
+      !mock.calls.some((c) => c.u.includes("/athletes") && c.method === "POST"),
+      "a matched athlete is reused, never re-created",
+    );
+    const purIns = mock.calls.find((c) => c.u.includes("/package_purchases") && c.method === "POST");
+    assert.strictEqual(purIns.body.athlete_id, ATHLETE_ID, "purchase linked to the matched athlete");
+    assert.strictEqual(purIns.body.credits_total, 10, "credits from the package");
+    assert.strictEqual(purIns.body.expires_at, null, "no-expiry package -> expires_at null");
+    assert.ok(
+      mock.calls.some((c) => c.u.includes("/athlete_claims") && c.method === "POST"),
+      "an unclaimed matched athlete is offered a claim",
+    );
+  } finally {
+    delete process.env.STRIPE_WEBHOOK_SECRET;
+    mock.restore();
+    server.close();
+  }
+});
+
+test("webhook links the purchase to a CLAIMED athlete without minting a claim", async () => {
+  process.env.STRIPE_WEBHOOK_SECRET = "whsec_testsecret";
+  const { server, port } = await startServer();
+  const mock = installFetchMock([
+    {
+      test: (u, m) =>
+        u.includes("/package_purchases") && u.includes("stripe_session_id=eq.") && m === "GET",
+      reply: () => okr([]),
+    },
+    {
+      test: (u, m) => u.includes("/packages") && m === "GET",
+      reply: () => okr([{ id: PKG_ID, coach_id: COACH_ID, credits: 5, expires_days: 30 }]),
+    },
+    {
+      // an existing CLAIMED athlete (user_id set) matches the buyer email.
+      test: (u, m) => u.includes("/athletes") && m === "GET",
+      reply: () => okr([{ id: ATHLETE_ID, user_id: "auth-user-1" }]),
+    },
+    {
+      test: (u, m) => u.includes("/package_purchases") && m === "POST",
+      reply: () => okr([{ id: "ffffffff-ffff-4fff-8fff-ffffffffffff" }], 201),
+    },
+  ]);
+  try {
+    const res = await completedEvent(port, {
+      id: SESSION_ID,
+      amount_total: 5000,
+      metadata: { packageId: PKG_ID },
+      customer_details: { email: "claimed@example.com" },
+    });
+    assert.strictEqual(res.status, 200);
+    assert.ok(
+      !mock.calls.some((c) => c.u.includes("/athlete_claims")),
+      "a claimed athlete is never offered a claim",
+    );
+    const purIns = mock.calls.find((c) => c.u.includes("/package_purchases") && c.method === "POST");
+    assert.strictEqual(purIns.body.athlete_id, ATHLETE_ID, "purchase still linked to the athlete");
+  } finally {
+    delete process.env.STRIPE_WEBHOOK_SECRET;
+    mock.restore();
+    server.close();
+  }
+});
+
+test("webhook is idempotent: a duplicate session id no-ops (no second purchase)", async () => {
+  process.env.STRIPE_WEBHOOK_SECRET = "whsec_testsecret";
+  const { server, port } = await startServer();
+  const mock = installFetchMock([
+    {
+      // idempotency pre-check finds an existing purchase for this session.
+      test: (u, m) =>
+        u.includes("/package_purchases") && u.includes("stripe_session_id=eq.") && m === "GET",
+      reply: () => okr([{ id: "existing-purchase" }]),
+    },
+  ]);
+  try {
+    const res = await completedEvent(port, {
+      id: SESSION_ID,
+      amount_total: 5000,
+      metadata: { packageId: PKG_ID },
+      customer_details: { email: "dup@example.com" },
+    });
+    assert.strictEqual(res.status, 200, "a duplicate delivery is ACK'd, never retried");
+    assert.ok(
+      !mock.calls.some((c) => c.u.includes("/package_purchases") && c.method === "POST"),
+      "no second purchase is inserted for a duplicate session",
+    );
+    assert.ok(
+      !mock.calls.some((c) => c.u.includes("/packages") && c.method === "GET"),
+      "a duplicate short-circuits before any package lookup or provisioning",
+    );
+  } finally {
+    delete process.env.STRIPE_WEBHOOK_SECRET;
+    mock.restore();
+    server.close();
+  }
+});

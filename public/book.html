@@ -260,6 +260,17 @@
           <span>Your coach will go live here. When it's time, open this link again or the one your coach sends and you'll join the room.</span>
         </div>
       </div>
+
+      <!-- D19: low-key progressive-account offer. Only rendered when the book
+           response carries a claim_url (the athlete has no account yet). A
+           claimed athlete never sees this. No form: /claim handles everything. -->
+      <div class="s-card" id="claimCard" style="display:none">
+        <h3>Your portal</h3>
+        <p style="margin:0 0 12px;">Want your film, punch lists, and every session in one place? Set up your portal in one tap.</p>
+        <a class="cal" id="claimLink" target="_blank" rel="noopener">
+          <span class="cal-ico" aria-hidden="true">🎟️</span><span>Get your link</span>
+        </a>
+      </div>
     </div>
   </div>
 
@@ -343,6 +354,8 @@
   var succTime = document.getElementById("succTime");
   var gcalLink = document.getElementById("gcalLink");
   var icsLink = document.getElementById("icsLink");
+  var claimCard = document.getElementById("claimCard");
+  var claimLink = document.getElementById("claimLink");
 
   // ---- state ----
   var athleteId = null;      // from /schedule; may stay null (server derives from token)
@@ -640,7 +653,10 @@
         starts_at: asStr(booked.starts_at) || slot.starts_at,
         ends_at: asStr(booked.ends_at) || slot.ends_at,
         title: asStr(booked.title) || slot.title,
-        ics_url: httpsUrl(data.ics_url || data.icsUrl)
+        ics_url: httpsUrl(data.ics_url || data.icsUrl),
+        // D19: the server sends claim_url only for an unclaimed athlete (null
+        // otherwise). https-validated like every other API URL before it's used.
+        claim_url: httpsUrl(data.claim_url)
       };
       showSuccess(confirmed);
     } catch (err) {
@@ -664,6 +680,11 @@
     if (g) { gcalLink.setAttribute("href", g); show(gcalLink); } else { hide(gcalLink); }
 
     if (slot.ics_url) { icsLink.setAttribute("href", slot.ics_url); show(icsLink); } else { hide(icsLink); }
+
+    // D19 progressive account: surface the low-key portal offer only when the
+    // server handed back a claim link (unclaimed athlete). Claimed athletes get
+    // nothing here. The link points at /claim/<token>, which handles everything.
+    if (slot.claim_url) { claimLink.setAttribute("href", slot.claim_url); show(claimCard); } else { hide(claimCard); }
 
     show(successEl);
     window.scrollTo(0, 0);

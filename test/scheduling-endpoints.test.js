@@ -24,7 +24,7 @@ delete process.env.RESEND_API_KEY;
 
 const { app } = require("../index.js");
 const { buildIcs, formatCalendarDate } = require("../lib/ics.js");
-const { expandWindows } = require("../lib/scheduling.js");
+const { expandWindows, bookingEmailHtml } = require("../lib/scheduling.js");
 
 // ---- tiny in-process HTTP harness (same shape as payments.test.js) ---------
 function startServer() {
@@ -75,6 +75,8 @@ const COACH_ID = "33333333-3333-4333-8333-333333333333";
 const ATHLETE_ID = "44444444-4444-4444-8444-444444444444";
 const PURCHASE_ID = "55555555-5555-4555-8555-555555555555";
 const NEW_INVITE_TOKEN = "66666666-6666-4666-8666-666666666666"; // minted by /send-invite
+const CLAIM_TOKEN = "77777777-7777-4777-8777-777777777777"; // minted by the claim touchpoint
+const AUTH_ID = "88888888-8888-4888-8888-888888888888"; // a claimed athlete's auth user id
 
 // ===========================================================================
 // 1. ics golden: line folding + escaping
@@ -946,4 +948,182 @@ test("POST /coach/bookings/cancel on a no-deduct booking -> 200 refunded false, 
     mock.restore();
     server.close();
   }
+});
+
+// ===========================================================================
+// D19 CLAIM-AT-BOOKING TOUCHPOINT (progressive accounts)
+// ===========================================================================
+//
+// A successful booking of an UNCLAIMED athlete (athletes.user_id null) offers the
+// account: reuse-or-mint an athlete_claims row and thread the /claim link into
+// both the JSON response (claim_url) and the confirmation email. A CLAIMED athlete
+// gets neither. These share a full happy-path booking mock; `athleteUserId` toggles
+// claimed vs unclaimed and `reusableClaim` toggles reuse vs fresh mint.
+function fullBookingRoutes({ athleteUserId = null, reusableClaim = null } = {}) {
+  return [
+    {
+      test: (u, m) => u.includes("/booking_invites") && m === "GET",
+      reply: () =>
+        ok([
+          {
+            token: UUID_A,
+            coach_id: COACH_ID,
+            athlete_id: ATHLETE_ID,
+            slot_id: null,
+            email: "parent@example.com",
+            status: "pending",
+            expires_at: FUTURE,
+            coaches: { full_name: "Coach CJ" },
+            athletes: {
+              name: "Athlete A",
+              parent_email: "parent@example.com",
+              user_id: athleteUserId,
+            },
+          },
+        ]),
+    },
+    {
+      // FIFO source query (carries credits_remaining=gt.0): the purchase to spend.
+      test: (u, m) =>
+        u.includes("/package_purchases") && u.includes("credits_remaining=gt.0") && m === "GET",
+      reply: () => ok([{ id: PURCHASE_ID, credits_remaining: 3, coach_id: COACH_ID }]),
+    },
+    {
+      // Credit balance (precheck + final re-sum): active purchases only.
+      test: (u, m) =>
+        u.includes("/package_purchases") && u.includes("status=eq.active") && m === "GET",
+      reply: () => ok([{ credits_remaining: 3 }]),
+    },
+    {
+      // Slot claim open -> booked: 1 row won.
+      test: (u, m) =>
+        u.includes("/bookable_slots") && u.includes("status=eq.open") && m === "PATCH",
+      reply: () =>
+        ok([{ id: SLOT_ID, status: "booked", starts_at: FUTURE, ends_at: FUTURE, title: "Session" }]),
+    },
+    {
+      // FIFO decrement PATCH: won the optimistic race on the source purchase.
+      test: (u, m) => u.includes("/package_purchases") && m === "PATCH",
+      reply: () => ok([{ id: PURCHASE_ID }]),
+    },
+    {
+      test: (u, m) => u.includes("/sessions") && m === "POST",
+      reply: () => ok([{ id: "99999999-9999-4999-8999-999999999999" }]),
+    },
+    {
+      // Claim reuse lookup: an unexpired unclaimed row, or none (=> mint).
+      test: (u, m) => u.includes("/athlete_claims") && m === "GET",
+      reply: () => ok(reusableClaim ? [{ token: reusableClaim }] : []),
+    },
+    {
+      // Claim mint.
+      test: (u, m) => u.includes("/athlete_claims") && m === "POST",
+      reply: () => ok([{ token: CLAIM_TOKEN }]),
+    },
+  ];
+}
+
+test("book success for an UNCLAIMED athlete returns claim_url and mints a claim row", async () => {
+  const { server, port } = await startServer();
+  const mock = installFetchMock(fullBookingRoutes({ athleteUserId: null }));
+  try {
+    const res = await request(port, {
+      method: "POST",
+      path: `/schedule/${UUID_A}/book`,
+      body: JSON.stringify({ slotId: SLOT_ID }),
+    });
+    assert.strictEqual(res.status, 200);
+    assert.ok(
+      typeof res.json.claim_url === "string" &&
+        res.json.claim_url.endsWith(`/claim/${CLAIM_TOKEN}`),
+      "the response carries the athlete's claim URL",
+    );
+    // A claim row was minted (no reusable one existed).
+    assert.ok(
+      mock.calls.some((c) => c.u.includes("/athlete_claims") && c.method === "POST"),
+      "a fresh claim row was minted",
+    );
+    // The mint carried the coach + athlete, byte-identical to the coach-side mint.
+    const mint = mock.calls.find((c) => c.u.includes("/athlete_claims") && c.method === "POST");
+    assert.strictEqual(mint.body.coach_id, COACH_ID);
+    assert.strictEqual(mint.body.athlete_id, ATHLETE_ID);
+  } finally {
+    mock.restore();
+    server.close();
+  }
+});
+
+test("book success for a CLAIMED athlete returns no claim_url and touches no claim row", async () => {
+  const { server, port } = await startServer();
+  const mock = installFetchMock(fullBookingRoutes({ athleteUserId: AUTH_ID }));
+  try {
+    const res = await request(port, {
+      method: "POST",
+      path: `/schedule/${UUID_A}/book`,
+      body: JSON.stringify({ slotId: SLOT_ID }),
+    });
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.json.claim_url, null, "a claimed athlete gets no claim URL");
+    assert.ok(
+      !mock.calls.some((c) => c.u.includes("/athlete_claims")),
+      "the claim table is never touched for a claimed athlete",
+    );
+  } finally {
+    mock.restore();
+    server.close();
+  }
+});
+
+test("book success reuses an existing unclaimed claim instead of minting a duplicate", async () => {
+  const { server, port } = await startServer();
+  const REUSE = "12121212-1212-4121-8121-121212121212";
+  const mock = installFetchMock(fullBookingRoutes({ athleteUserId: null, reusableClaim: REUSE }));
+  try {
+    const res = await request(port, {
+      method: "POST",
+      path: `/schedule/${UUID_A}/book`,
+      body: JSON.stringify({ slotId: SLOT_ID }),
+    });
+    assert.strictEqual(res.status, 200);
+    assert.ok(
+      res.json.claim_url.endsWith(`/claim/${REUSE}`),
+      "the response reuses the existing claim token",
+    );
+    assert.ok(
+      !mock.calls.some((c) => c.u.includes("/athlete_claims") && c.method === "POST"),
+      "no duplicate claim row is minted when a reusable one exists",
+    );
+  } finally {
+    mock.restore();
+    server.close();
+  }
+});
+
+test("the booking confirmation email carries the claim link only when one exists", () => {
+  const start = new Date("2026-07-24T21:00:00.000Z");
+  const withClaim = bookingEmailHtml({
+    athleteName: "Athlete A",
+    coachName: "Coach CJ",
+    start,
+    gcal: "https://calendar.google.com/x",
+    bookUrl: "https://coachtime.app/book/abc",
+    claimUrl: "https://coachtime.app/claim/" + CLAIM_TOKEN,
+  });
+  assert.ok(
+    withClaim.includes("/claim/" + CLAIM_TOKEN),
+    "the claim link is rendered as a secondary CTA under the calendar button",
+  );
+
+  const withoutClaim = bookingEmailHtml({
+    athleteName: "Athlete A",
+    coachName: "Coach CJ",
+    start,
+    gcal: "https://calendar.google.com/x",
+    bookUrl: "https://coachtime.app/book/abc",
+    claimUrl: null,
+  });
+  assert.ok(
+    !withoutClaim.includes("/claim/"),
+    "a claimed athlete's email has no portal link",
+  );
 });
