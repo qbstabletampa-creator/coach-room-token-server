@@ -1327,6 +1327,12 @@ if (SCHEDULING_ENABLED) {
   app.post("/schedule/:inviteToken/book", scheduleWriteLimiter, scheduling.bookSlot);
   app.post("/schedule/:inviteToken/cancel", scheduleWriteLimiter, scheduling.cancelBooking);
   app.post("/coach/slots/generate", slotGenLimiter, scheduling.generateSlots);
+  app.post("/send-invite", scheduleWriteLimiter, scheduling.sendInvite);
+
+  // Reminders cron endpoint. Flag-gated with the rest of scheduling; the
+  // handler itself enforces the cron secret. Logic lives in lib/reminders.js.
+  const { buildRemindersHandler } = require("./lib/reminders");
+  app.get("/cron/reminders", buildRemindersHandler({ notify }));
 }
 
 // Only bind the port when run directly (node index.js). When required by a test

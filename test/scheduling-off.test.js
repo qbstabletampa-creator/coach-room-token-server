@@ -24,10 +24,10 @@ function startServer() {
   });
 }
 
-function request(port, path) {
+function request(port, path, method = "GET") {
   return new Promise((resolve, reject) => {
     const req = http.request(
-      { hostname: "127.0.0.1", port, path, method: "GET" },
+      { hostname: "127.0.0.1", port, path, method },
       (res) => {
         let data = "";
         res.on("data", (c) => (data += c));
@@ -46,6 +46,16 @@ test("GET /book/:inviteToken 404s when SCHEDULING_ENABLED is off", async () => {
   try {
     const res = await request(port, `/book/${VALID_TOKEN}`);
     assert.strictEqual(res.status, 404, "the booking route is absent until the flag is on");
+  } finally {
+    server.close();
+  }
+});
+
+test("POST /send-invite 404s when SCHEDULING_ENABLED is off", async () => {
+  const { server, port } = await startServer();
+  try {
+    const res = await request(port, "/send-invite", "POST");
+    assert.strictEqual(res.status, 404, "send-invite is absent until the flag is on");
   } finally {
     server.close();
   }

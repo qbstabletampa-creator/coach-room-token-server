@@ -74,6 +74,7 @@ const SLOT_ID = "22222222-2222-4222-8222-222222222222";
 const COACH_ID = "33333333-3333-4333-8333-333333333333";
 const ATHLETE_ID = "44444444-4444-4444-8444-444444444444";
 const PURCHASE_ID = "55555555-5555-4555-8555-555555555555";
+const NEW_INVITE_TOKEN = "66666666-6666-4666-8666-666666666666"; // minted by /send-invite
 
 // ===========================================================================
 // 1. ics golden: line folding + escaping
@@ -406,4 +407,277 @@ test("expandWindows computes real UTC from the IANA zone (no fake-local)", () =>
   // 17:00 EDT == 21:00 UTC.
   const start = new Date(rows[0].starts_at);
   assert.strictEqual(start.getUTCHours(), 21, "5pm New York in July is 21:00 UTC");
+});
+
+// ===========================================================================
+// 7. POST /send-invite happy path: 201 { token, url, expires_at ~14d }
+// ===========================================================================
+
+test("POST /send-invite mints an invite: 201 token + url + ~14-day expiry", async () => {
+  const { server, port } = await startServer();
+  const mock = installFetchMock([
+    {
+      // coach JWT -> a coach-role user.
+      test: (u) => u.includes("/auth/v1/user"),
+      reply: () => ok({ id: COACH_ID, user_metadata: { role: "coach" } }),
+    },
+    {
+      // tenant check: the athlete belongs to this coach.
+      test: (u, m) => u.includes("/athletes") && m === "GET",
+      reply: () => ok([{ id: ATHLETE_ID }]),
+    },
+    {
+      // insert echoes the body back with a DB-minted token.
+      test: (u, m) => u.includes("/booking_invites") && m === "POST",
+      reply: (u, m, opts) => ok([{ token: NEW_INVITE_TOKEN, ...JSON.parse(opts.body) }]),
+    },
+  ]);
+  try {
+    const res = await request(port, {
+      method: "POST",
+      path: "/send-invite",
+      headers: { authorization: "Bearer coach-jwt" },
+      body: JSON.stringify({ athlete_id: ATHLETE_ID }),
+    });
+    assert.strictEqual(res.status, 201);
+    assert.strictEqual(res.json.token, NEW_INVITE_TOKEN);
+    assert.ok(
+      res.json.url.endsWith(`/book/${NEW_INVITE_TOKEN}`),
+      "url points at the athlete booking page for this token",
+    );
+    const days = (new Date(res.json.expires_at).getTime() - Date.now()) / 86400000;
+    assert.ok(days > 13.5 && days < 14.5, "invite expires ~14 days out");
+
+    // The insert carried a pending status, the coach from auth, and ~14d expiry.
+    const ins = mock.calls.find((c) => c.u.includes("/booking_invites") && c.method === "POST");
+    assert.ok(ins, "an invite row was inserted");
+    assert.strictEqual(ins.body.status, "pending");
+    assert.strictEqual(ins.body.coach_id, COACH_ID);
+    assert.strictEqual(ins.body.athlete_id, ATHLETE_ID);
+    const insDays = (new Date(ins.body.expires_at).getTime() - Date.now()) / 86400000;
+    assert.ok(insDays > 13.5 && insDays < 14.5, "inserted expiry is ~14 days");
+  } finally {
+    mock.restore();
+    server.close();
+  }
+});
+
+// ===========================================================================
+// 7b. the returned url path shape matches the registered /book/:token route:
+//     mint via /send-invite, then GET the returned url's pathname through the
+//     app and expect 200 (book.html served). Proves the link is not a dead
+//     /book?token= query form.
+// ===========================================================================
+
+test("POST /send-invite returns a url whose path the /book/:token route serves 200", async () => {
+  const { server, port } = await startServer();
+  const mock = installFetchMock([
+    {
+      test: (u) => u.includes("/auth/v1/user"),
+      reply: () => ok({ id: COACH_ID, user_metadata: { role: "coach" } }),
+    },
+    {
+      test: (u, m) => u.includes("/athletes") && m === "GET",
+      reply: () => ok([{ id: ATHLETE_ID }]),
+    },
+    {
+      test: (u, m) => u.includes("/booking_invites") && m === "POST",
+      reply: (u, m, opts) => ok([{ token: NEW_INVITE_TOKEN, ...JSON.parse(opts.body) }]),
+    },
+  ]);
+  try {
+    const mint = await request(port, {
+      method: "POST",
+      path: "/send-invite",
+      headers: { authorization: "Bearer coach-jwt" },
+      body: JSON.stringify({ athlete_id: ATHLETE_ID }),
+    });
+    assert.strictEqual(mint.status, 201);
+
+    // The url is the PATH form, not the dead query form.
+    assert.match(mint.json.url, /\/book\/[^/?]+$/, "url is the /book/:token path form");
+    assert.ok(!mint.json.url.includes("?token="), "no dead ?token= query form");
+
+    // The pathname round-trips through the actual registered route.
+    const pathname = new URL(mint.json.url).pathname;
+    const page = await request(port, { method: "GET", path: pathname });
+    assert.strictEqual(page.status, 200, "the /book/:token route serves the booking page");
+  } finally {
+    mock.restore();
+    server.close();
+  }
+});
+
+// ===========================================================================
+// 8. an athlete-role caller cannot mint invites -> 403, nothing inserted
+// ===========================================================================
+
+test("POST /send-invite rejects an athlete-role caller with 403", async () => {
+  const { server, port } = await startServer();
+  const mock = installFetchMock([
+    {
+      test: (u) => u.includes("/auth/v1/user"),
+      reply: () => ok({ id: ATHLETE_ID, user_metadata: { role: "athlete" } }),
+    },
+  ]);
+  try {
+    const res = await request(port, {
+      method: "POST",
+      path: "/send-invite",
+      headers: { authorization: "Bearer athlete-jwt" },
+      body: JSON.stringify({ athlete_id: ATHLETE_ID }),
+    });
+    assert.strictEqual(res.status, 403);
+    assert.ok(
+      !mock.calls.some((c) => c.u.includes("/booking_invites") && c.method === "POST"),
+      "no invite is minted for a non-coach caller",
+    );
+  } finally {
+    mock.restore();
+    server.close();
+  }
+});
+
+// ===========================================================================
+// 9. a coach cannot invite another coach's athlete (cross-tenant) -> 403
+// ===========================================================================
+
+test("POST /send-invite rejects a cross-tenant athlete_id with 403", async () => {
+  const { server, port } = await startServer();
+  const mock = installFetchMock([
+    {
+      test: (u) => u.includes("/auth/v1/user"),
+      reply: () => ok({ id: COACH_ID, user_metadata: { role: "coach" } }),
+    },
+    {
+      // tenant check: the athlete is NOT in this coach's roster -> empty.
+      test: (u, m) => u.includes("/athletes") && m === "GET",
+      reply: () => ok([]),
+    },
+  ]);
+  try {
+    const res = await request(port, {
+      method: "POST",
+      path: "/send-invite",
+      headers: { authorization: "Bearer coach-jwt" },
+      body: JSON.stringify({ athlete_id: ATHLETE_ID }),
+    });
+    assert.strictEqual(res.status, 403);
+    assert.ok(
+      !mock.calls.some((c) => c.u.includes("/booking_invites") && c.method === "POST"),
+      "no invite is minted for a cross-tenant athlete",
+    );
+  } finally {
+    mock.restore();
+    server.close();
+  }
+});
+
+// ===========================================================================
+// 9b. a coach cannot pre-assign another coach's slot (cross-tenant) -> 403
+// ===========================================================================
+
+test("POST /send-invite rejects a cross-tenant slot_id with 403 cross_tenant", async () => {
+  const { server, port } = await startServer();
+  const mock = installFetchMock([
+    {
+      test: (u) => u.includes("/auth/v1/user"),
+      reply: () => ok({ id: COACH_ID, user_metadata: { role: "coach" } }),
+    },
+    {
+      // the athlete IS in this coach's roster (isolates the slot check).
+      test: (u, m) => u.includes("/athletes") && m === "GET",
+      reply: () => ok([{ id: ATHLETE_ID }]),
+    },
+    {
+      // slot ownership check: the slot is NOT this coach's -> empty.
+      test: (u, m) => u.includes("/bookable_slots") && m === "GET",
+      reply: () => ok([]),
+    },
+  ]);
+  try {
+    const res = await request(port, {
+      method: "POST",
+      path: "/send-invite",
+      headers: { authorization: "Bearer coach-jwt" },
+      body: JSON.stringify({ athlete_id: ATHLETE_ID, slot_id: SLOT_ID }),
+    });
+    assert.strictEqual(res.status, 403);
+    assert.strictEqual(res.json.error, "cross_tenant");
+    assert.ok(
+      !mock.calls.some((c) => c.u.includes("/booking_invites") && c.method === "POST"),
+      "no invite is minted for a cross-tenant slot",
+    );
+  } finally {
+    mock.restore();
+    server.close();
+  }
+});
+
+// ===========================================================================
+// 10. the minted invite is usable by the real lookupInvite/inviteUsable path:
+//     mint via /send-invite, then load it through GET /schedule (which calls
+//     lookupInvite + inviteUsable) -> 200. A stateful mock round-trips the row.
+// ===========================================================================
+
+test("POST /send-invite mints an invite GET /schedule accepts as usable", async () => {
+  const { server, port } = await startServer();
+  let storedInvite = null;
+  const mock = installFetchMock([
+    {
+      test: (u) => u.includes("/auth/v1/user"),
+      reply: () => ok({ id: COACH_ID, user_metadata: { role: "coach" } }),
+    },
+    {
+      test: (u, m) => u.includes("/athletes") && m === "GET",
+      reply: () => ok([{ id: ATHLETE_ID }]),
+    },
+    {
+      // mint: persist the inserted row (with the DB-minted token) into the store.
+      test: (u, m) => u.includes("/booking_invites") && m === "POST",
+      reply: (u, m, opts) => {
+        const b = JSON.parse(opts.body);
+        storedInvite = {
+          token: NEW_INVITE_TOKEN,
+          ...b,
+          coaches: { full_name: "Coach CJ" },
+          athletes: { name: "Athlete A", parent_email: null },
+        };
+        return ok([{ token: NEW_INVITE_TOKEN, ...b }]);
+      },
+    },
+    {
+      // lookupInvite reads the stored row back -> proves it flows the real path.
+      test: (u, m) => u.includes("/booking_invites") && m === "GET",
+      reply: () => ok(storedInvite ? [storedInvite] : []),
+    },
+    {
+      // getSchedule slot list + credit balance (empty is fine for this proof).
+      test: (u, m) => u.includes("/bookable_slots") && m === "GET",
+      reply: () => ok([]),
+    },
+    {
+      test: (u, m) => u.includes("/package_purchases") && m === "GET",
+      reply: () => ok([]),
+    },
+  ]);
+  try {
+    const mint = await request(port, {
+      method: "POST",
+      path: "/send-invite",
+      headers: { authorization: "Bearer coach-jwt" },
+      body: JSON.stringify({ athlete_id: ATHLETE_ID }),
+    });
+    assert.strictEqual(mint.status, 201);
+    const token = mint.json.token;
+
+    // Load it through the real invite path. A 200 means inviteUsable accepted the
+    // freshly minted (pending, 14-day) row that lookupInvite returned.
+    const sched = await request(port, { method: "GET", path: `/schedule/${token}` });
+    assert.strictEqual(sched.status, 200, "the minted invite is usable, not expired/consumed");
+    assert.strictEqual(sched.json.athleteId, ATHLETE_ID);
+  } finally {
+    mock.restore();
+    server.close();
+  }
 });
