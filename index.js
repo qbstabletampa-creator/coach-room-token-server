@@ -19,6 +19,7 @@ const { stripeWebhookHandler } = require("./lib/stripe-webhook");
 const { createSessionHandler } = require("./lib/checkout");
 const { buildSchedulingHandlers } = require("./lib/scheduling");
 const { buildStorefrontHandlers } = require("./lib/storefront");
+const { buildPaymentsHandlers } = require("./lib/payments");
 const { buildAccountDeleteHandler } = require("./lib/account-delete");
 
 const PORT = process.env.PORT || 3130;
@@ -67,6 +68,13 @@ const STRIPE_WEBHOOK_ENABLED = envFlag("STRIPE_WEBHOOK_ENABLED");
 // The same flag also gates the athlete booking page (GET /book/:inviteToken)
 // added below, so book.html and its /schedule data source flip on together.
 const SCHEDULING_ENABLED = envFlag("SCHEDULING_ENABLED");
+// PAYMENTS_ENABLED gates the Phase 1 "get paid your way" routes (payments
+// overview, record, void, charges, rail preferences). OFF by default: inert in
+// production until CJ flips the flag. Same additive, guarded posture as the
+// scheduling / checkout flags. It does NOT gate the Stripe webhook's payments
+// ledger mirror — that rides the webhook's own STRIPE_WEBHOOK_ENABLED flag and
+// runs as part of provisioning, so the one ledger stays whole regardless.
+const PAYMENTS_ENABLED = envFlag("PAYMENTS_ENABLED");
 
 if (!LIVEKIT_API_KEY || !LIVEKIT_API_SECRET || !LIVEKIT_URL) {
   console.error(
@@ -1450,6 +1458,43 @@ if (SCHEDULING_ENABLED) {
   app.get("/cron/reminders", buildRemindersHandler({ notify }));
 }
 
+// ---- Phase 1 payments routes (additive, env-flag guarded OFF by default) -----
+// "Get paid your way": mark-paid rails + owed + the single payments ledger. All
+// coach-authed (Supabase JWT, coachId derived from the verified token). Every
+// route carries its own express-rate-limit limiter mirroring scheduleWriteLimiter
+// (money-adjacent posture, tight cap). When PAYMENTS_ENABLED is unset none of
+// these register at all. These /payments + /charges routes are DISTINCT from the
+// older payments backbone (/stripe/webhook, /checkout/create-session) above —
+// they share no path prefix and no state.
+if (PAYMENTS_ENABLED) {
+  const paymentsReadLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 60, // reading the overview is cheap; a coach may refresh a few times.
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many requests, slow down." },
+  });
+  const paymentsWriteLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 20, // record/void/charge are money-adjacent; tight cap like scheduleWriteLimiter.
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many payment updates, slow down." },
+  });
+
+  const payments = buildPaymentsHandlers({ requireSupabaseUser, notify });
+
+  // Literal read routes first, then the writes. /payments/:id/void carries a
+  // param but its distinct suffix never shadows the literal /payments/overview
+  // or /payments/methods (Express matches in registration order anyway).
+  app.get("/payments/overview", paymentsReadLimiter, payments.getOverview);
+  app.get("/payments/methods", paymentsReadLimiter, payments.getMethods);
+  app.post("/payments", paymentsWriteLimiter, payments.postPayment);
+  app.post("/payments/:id/void", paymentsWriteLimiter, payments.postVoid);
+  app.post("/charges", paymentsWriteLimiter, payments.postCharge);
+  app.patch("/payments/rails", paymentsWriteLimiter, payments.patchRails);
+}
+
 // Only bind the port when run directly (node index.js). When required by a test
 // (require.main !== module) we export the pure helpers for unit testing and skip
 // listen(), so tests never open a socket or need live LiveKit/Supabase creds.
@@ -1475,6 +1520,8 @@ module.exports = {
   buildSchedulingHandlers,
   // Storefront backbone (additive). Exported for unit tests + future callers.
   buildStorefrontHandlers,
+  // Payments Phase 1 (additive). Exported for unit tests + future callers.
+  buildPaymentsHandlers,
   // Account deletion (D1). Exported for unit tests + future callers.
   buildAccountDeleteHandler,
 };
