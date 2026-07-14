@@ -208,10 +208,12 @@
     pointer-events: none; z-index: 7;
   }
   #annoOverlay svg { width: 100%; height: 100%; display: block; }
-  #annoOverlay path {
-    fill: none; stroke: var(--gold); stroke-width: 4;
-    stroke-linecap: round; stroke-linejoin: round;
-    filter: drop-shadow(0 0 4px rgba(212,195,106,0.65));
+  /* Stroke color/width come from per-shape SVG attributes (renderShapes) — a
+     CSS `stroke` here OVERRIDES presentation attributes and forced every pen
+     stroke to one gold-green color (CJ device test 2026-07-13). Only the
+     neutral halo lives in CSS. */
+  #annoOverlay path, #annoOverlay line, #annoOverlay circle {
+    filter: drop-shadow(0 0 4px rgba(0,0,0,0.55));
   }
   /* Dim the live frame under the strokes while frozen. */
   #freezeScrim {
