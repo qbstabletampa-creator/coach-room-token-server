@@ -1,0 +1,21 @@
+# CoachTime
+
+> CoachTime is a coaching app where a coach runs their whole business: a public
+> booking page, session types and prices, availability, session-credit packages,
+> payment rails, a roster, live video sessions with on-screen telestration, and
+> session recaps.
+
+The one thing to know: CoachTime is built to be set up and run by the coach's own
+AI. A coach pastes a prompt into their AI, the AI reads the setup pack, interviews
+the coach, and walks them through setup screen by screen.
+
+## Setup
+
+- [AI setup pack](/ai): the full instruction pack for a coach's AI. It interviews
+  the coach (sport, services, prices, availability, roster) and guides CoachTime
+  setup one screen at a time. Stage 1 is guide-only; the AI does not press buttons
+  yet.
+
+## Contact
+
+- Support: in-app, You tab, Contact support.

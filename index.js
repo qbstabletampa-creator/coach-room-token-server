@@ -20,6 +20,8 @@ const { createSessionHandler } = require("./lib/checkout");
 const { buildSchedulingHandlers } = require("./lib/scheduling");
 const { buildStorefrontHandlers } = require("./lib/storefront");
 const { buildPaymentsHandlers } = require("./lib/payments");
+const { buildDashboardHandlers } = require("./lib/dashboard");
+const { buildImportHandlers } = require("./lib/import");
 const { buildAccountDeleteHandler } = require("./lib/account-delete");
 
 const PORT = process.env.PORT || 3130;
@@ -75,6 +77,14 @@ const SCHEDULING_ENABLED = envFlag("SCHEDULING_ENABLED");
 // ledger mirror — that rides the webhook's own STRIPE_WEBHOOK_ENABLED flag and
 // runs as part of provisioning, so the one ledger stays whole regardless.
 const PAYMENTS_ENABLED = envFlag("PAYMENTS_ENABLED");
+// DASHBOARD_ENABLED gates the round-2 coach dashboard rollup (GET
+// /coach/dashboard). IMPORT_ENABLED gates the bulk athlete import
+// (POST /coach/athletes/import). Both OFF by default: inert in production until
+// CJ flips the flag. Same additive, guarded posture as the payments/scheduling
+// flags. The /ai + /llms.txt static pack routes are PUBLIC and always on (no
+// flag) — they serve a public document with no tenant data.
+const DASHBOARD_ENABLED = envFlag("DASHBOARD_ENABLED");
+const IMPORT_ENABLED = envFlag("IMPORT_ENABLED");
 
 if (!LIVEKIT_API_KEY || !LIVEKIT_API_SECRET || !LIVEKIT_URL) {
   console.error(
@@ -196,6 +206,16 @@ if (STRIPE_WEBHOOK_ENABLED) {
   );
 }
 
+// Import route body cap: a pasted roster can exceed the global 100 KB json
+// limit, so mount a route-scoped 1 MB parser BEFORE the global express.json()
+// (the same before-the-global precedent as the Stripe raw body above). It
+// touches ONLY /coach/athletes/import; every other route still gets the
+// default-limit express.json() below. express.json sets req._body, so the global
+// parser skips this path (no double-parse). Gated OFF by default.
+if (IMPORT_ENABLED) {
+  app.use("/coach/athletes/import", express.json({ limit: "1mb" }));
+}
+
 app.use(express.json());
 
 // ---- Analyze v1: same-origin CORS proxy --------------------------------------
@@ -295,6 +315,22 @@ app.get("/analyze/proxy", async (req, res) => {
 // (static would only answer /privacy.html).
 app.get("/privacy", (_req, res) => {
   res.sendFile(path.join(__dirname, "public", "privacy.html"));
+});
+
+// GET /ai + GET /llms.txt — the public AI Onboarding Pack (round-2 spec). A coach
+// pastes the /ai URL into their own Claude/ChatGPT; the AI reads the pack and
+// walks them through setup. Public, unauthenticated, cacheable — same class as
+// /privacy, so defined BEFORE express.static (the clean URL answers everywhere,
+// and the explicit Content-Type wins over static's guess). URL is FROZEN once
+// shipped. Foundation ships one-line placeholders; the integration pass writes
+// the real pack.
+app.get("/ai", (_req, res) => {
+  res.type("text/markdown; charset=utf-8");
+  res.sendFile(path.join(__dirname, "public", "ai", "coachtime-setup.md"));
+});
+app.get("/llms.txt", (_req, res) => {
+  res.type("text/plain; charset=utf-8");
+  res.sendFile(path.join(__dirname, "public", "llms.txt"));
 });
 
 // Serve static assets (public/join.html etc.)
@@ -1495,6 +1531,42 @@ if (PAYMENTS_ENABLED) {
   app.patch("/payments/rails", paymentsWriteLimiter, payments.patchRails);
 }
 
+// ---- Round-2 coach dashboard (additive, env-flag guarded OFF by default) -----
+// GET /coach/dashboard — the revenue/bookings/open-slots/needs-attention rollup.
+// Coach-authed (Supabase JWT, coachId from the verified token). Read-rate limited.
+// FOUNDATION: the handler is a 501 stub; the dashboard builder fills the rollup.
+// When DASHBOARD_ENABLED is unset the route does not register at all.
+if (DASHBOARD_ENABLED) {
+  const dashboardReadLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 60, // reading the dashboard is cheap; a coach may refresh a few times.
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many requests, slow down." },
+  });
+  const dashboard = buildDashboardHandlers({ requireSupabaseUser });
+  app.get("/coach/dashboard", dashboardReadLimiter, dashboard.getDashboard);
+}
+
+// ---- Round-2 bulk athlete import (additive, env-flag guarded OFF by default) --
+// POST /coach/athletes/import — paste a roster, one tap imports everyone + returns
+// claim links (NO email; CAN-SPAM decree). Coach-authed (Supabase JWT, coachId
+// from the verified token). Write-rate limited. The route-scoped 1 MB body parser
+// is mounted above (before the global express.json). FOUNDATION: the handler is a
+// 501 stub; the import builder fills buildImportCore. When IMPORT_ENABLED is unset
+// the route does not register at all.
+if (IMPORT_ENABLED) {
+  const importWriteLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 20, // bulk import is a heavy write; tight cap like scheduleWriteLimiter.
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many import attempts, slow down." },
+  });
+  const importer = buildImportHandlers({ requireSupabaseUser });
+  app.post("/coach/athletes/import", importWriteLimiter, importer.importAthletes);
+}
+
 // Only bind the port when run directly (node index.js). When required by a test
 // (require.main !== module) we export the pure helpers for unit testing and skip
 // listen(), so tests never open a socket or need live LiveKit/Supabase creds.
@@ -1522,6 +1594,10 @@ module.exports = {
   buildStorefrontHandlers,
   // Payments Phase 1 (additive). Exported for unit tests + future callers.
   buildPaymentsHandlers,
+  // Round-2 dashboard + import (additive, foundation stubs). Exported for unit
+  // tests + the feature builders that fill the internals.
+  buildDashboardHandlers,
+  buildImportHandlers,
   // Account deletion (D1). Exported for unit tests + future callers.
   buildAccountDeleteHandler,
 };

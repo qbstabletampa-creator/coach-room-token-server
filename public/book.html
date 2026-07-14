@@ -66,6 +66,26 @@
     padding: 11px 18px; border-radius: var(--radius);
   }
 
+  /* ---------- Low-balance nudge (running low, not empty) ---------- */
+  .lowbal {
+    margin-top: 18px;
+    background: rgba(224,179,65,0.09);
+    border: 1px solid rgba(224,179,65,0.42);
+    border-radius: var(--radius); padding: 15px 16px 14px;
+    display: flex; gap: 11px; align-items: flex-start;
+  }
+  .lowbal .lb-dot {
+    width: 8px; height: 8px; border-radius: 50%; background: #E0B341;
+    margin-top: 6px; flex: 0 0 auto;
+  }
+  .lowbal .lb-body { flex: 1; min-width: 0; }
+  .lowbal p { font-size: 13.5px; color: var(--text); margin: 0; line-height: 1.5; }
+  .lowbal .lb-cta {
+    display: inline-block; text-decoration: none; margin-top: 12px;
+    background: var(--gold); color: #0E0E0F; font-weight: 700; font-size: 13.5px;
+    padding: 10px 16px; border-radius: var(--radius);
+  }
+
   /* ---------- Session type step ---------- */
   .type-step { margin-top: 24px; }
   .type-step .step-k {
@@ -249,6 +269,18 @@
         <a id="packsCta" class="cta" style="display:none" target="_blank" rel="noopener">See session packs</a>
       </div>
 
+      <!-- Package-balance (0015): soft "running low" nudge shown when the athlete
+           is at/under the coach's low-balance threshold but not yet empty. The
+           rebuy button appears only when a rebuy destination is available;
+           hidden otherwise (the live state today). -->
+      <div id="lowBal" class="lowbal" style="display:none">
+        <span class="lb-dot" aria-hidden="true"></span>
+        <div class="lb-body">
+          <p id="lowBalMsg"></p>
+          <a id="lowBalCta" class="lb-cta" style="display:none" target="_blank" rel="noopener">Get more sessions</a>
+        </div>
+      </div>
+
       <div id="errBanner" class="err-banner" style="display:none"></div>
 
       <!-- Storefront (0013): optional type step BEFORE times, shown only when the
@@ -339,6 +371,8 @@
   //    coachName,                          // string
   //    athleteId,                          // uuid | null (server derives identity from the token)
   //    credits,                            // integer >= 0
+  //    athlete_sees_balance,               // boolean (0015; default true when absent)
+  //    low_balance_threshold,              // integer >= 0 (0015; default 2 when absent)
   //    slots: [ { id, starts_at, ends_at, timezone, title } ]  // starts_at/ends_at real UTC ISO
   //  }
   //    404 { error }  -> invite not found OR expired (indistinguishable, honest error state)
@@ -373,6 +407,9 @@
   var packsEl = document.getElementById("packs");
   var packsMsg = document.getElementById("packsMsg");
   var packsCta = document.getElementById("packsCta");
+  var lowBalEl = document.getElementById("lowBal");
+  var lowBalMsg = document.getElementById("lowBalMsg");
+  var lowBalCta = document.getElementById("lowBalCta");
   var errBanner = document.getElementById("errBanner");
   var typeStep = document.getElementById("typeStep");
   var typeList = document.getElementById("typeList");
@@ -402,6 +439,16 @@
   var athleteId = null;      // from /schedule; may stay null (server derives from token)
   var creditsRemaining = 0;
   var checkoutUrl = null;
+  // Package-balance (0015). Defaults match the server: athletes see the count,
+  // threshold 2. An old cached page that never reads these still works (the pill
+  // shows as before, the low-balance nudge simply never appears).
+  var athleteSeesBalance = true;
+  var lowBalanceThreshold = 2;
+  // Rebuy destination for the low-balance nudge. PM rule: storefront checkout
+  // preferred, coach payment link fallback, HIDDEN when neither is available
+  // (the live state today — /schedule sends no rebuy URL yet). Read defensively
+  // so the button lights up automatically if a future payload carries one.
+  var rebuyUrl = null;
   var selectedSlot = null;   // the slot object the confirm sheet is for
   var selectedTypeId = null; // session type picked in the type step (optional)
   var selectedTypeName = "";
@@ -489,9 +536,39 @@
 
   // ---- render the booking view ----
   function renderCredits() {
+    // athlete_sees_balance off: hide the exact count entirely (the coach's
+    // choice). A low-balance nudge WITHOUT the number can still show below.
+    if (!athleteSeesBalance) { hide(creditPill); return; }
     creditText.textContent = creditsRemaining === 1 ? "1 credit" : creditsRemaining + " credits";
     creditPill.classList.toggle("zero", creditsRemaining <= 0);
     show(creditPill);
+  }
+
+  // Low-but-not-empty nudge. Zero credits is the packs panel's job (renderPacks),
+  // so this fires only for 0 < credits <= threshold. Honors athlete_sees_balance:
+  // the exact count is dropped from the copy when the coach hid it. The rebuy CTA
+  // shows only when a destination exists (hidden in the live state today).
+  function renderLowBalance() {
+    if (!(creditsRemaining > 0 && creditsRemaining <= lowBalanceThreshold)) {
+      hide(lowBalEl);
+      return;
+    }
+    if (athleteSeesBalance) {
+      lowBalMsg.textContent =
+        creditsRemaining === 1
+          ? "You're on your last session. Grab more so you don't miss a beat."
+          : "Running low — " + creditsRemaining + " sessions left. Grab more so you don't miss a beat.";
+    } else {
+      lowBalMsg.textContent =
+        "You're running low on sessions. Grab more so you don't miss a beat.";
+    }
+    if (rebuyUrl) {
+      lowBalCta.setAttribute("href", rebuyUrl);
+      show(lowBalCta);
+    } else {
+      hide(lowBalCta);
+    }
+    show(lowBalEl);
   }
 
   function renderPacks() {
@@ -819,6 +896,17 @@
         : (data.credits && isNum(data.credits.remaining) ? data.credits.remaining : 0);
       creditsRemaining = Math.max(0, Math.floor(creds));
 
+      // Package-balance flags (0015). Default true / 2 when absent (old server or
+      // 0015 unapplied) so the page behaves exactly as before.
+      athleteSeesBalance = data.athlete_sees_balance === false ? false : true;
+      lowBalanceThreshold = isNum(data.low_balance_threshold)
+        ? Math.max(0, Math.floor(data.low_balance_threshold))
+        : 2;
+      // Rebuy target: storefront checkout preferred, coach payment link fallback.
+      // Neither is sent by /schedule today, so this stays null and the CTA hides
+      // (the clean live state); read defensively for forward compatibility.
+      rebuyUrl = httpsUrl(data.checkout_url) || httpsUrl(data.payment_url) || null;
+
       // /schedule carries no checkout URL; the zero-credit hint arrives on the
       // 402 from a book attempt (checkoutHint). Leave it null here.
       checkoutUrl = null;
@@ -830,6 +918,7 @@
       show(bookingEl);
       renderCredits();
       renderPacks();
+      renderLowBalance();
       // On a refresh (after a taken-slot 409) keep the times visible; only reset
       // the type gate on a fresh load.
       if (!isRefresh) renderTypeStep(sessionTypes);
