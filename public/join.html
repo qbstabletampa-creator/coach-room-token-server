@@ -193,6 +193,28 @@
     z-index: 3;
   }
   #remoteWrap.sharing #shareVideo { display: block; }
+
+  /* ---------- Live telestration self-view (CJ, 2026-07-13) ----------
+     While coach strokes are on screen in a LIVE call, the athlete's own camera
+     owns the stage so the marks land on THEMSELVES (the coach draws on the
+     athlete's frame; rendering it over the coach's camera skewed everything).
+     Coach camera drops to the same lower-left PiP as co-watch/share. Ends when
+     the strokes clear. Unmirrored on purpose: strokes are in the published
+     (unmirrored) frame's coordinates. */
+  #selfStage {
+    position: absolute; inset: 0; display: none;
+    width: 100%; height: 100%; object-fit: cover; background: #000;
+    z-index: 3;
+  }
+  #remoteWrap.telestrate #selfStage { display: block; }
+  #remoteWrap.telestrate #remoteVideo {
+    position: absolute; left: 16px;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 96px);
+    width: 108px; height: 152px; object-fit: cover;
+    border-radius: var(--radius); z-index: 4;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.5);
+    border: 1px solid rgba(212,195,106,0.3);
+  }
   #remoteWrap.sharing #remoteVideo {
     position: absolute; left: 16px;
     bottom: calc(env(safe-area-inset-bottom, 0px) + 96px);
@@ -332,6 +354,10 @@
       <!-- Screen-share stage: the coach's shared device screen fills here while
            they present. Hidden (and never attached) in a camera-only call. -->
       <video id="shareVideo" autoplay playsinline aria-hidden="true"></video>
+
+      <!-- Live-telestration self-view: the athlete's own camera takes the stage
+           while coach strokes are live (face mode only). -->
+      <video id="selfStage" autoplay playsinline muted aria-hidden="true"></video>
 
       <!-- Freeze scrim dims the live frame under the strokes. -->
       <div id="freezeScrim" aria-hidden="true"></div>
@@ -944,12 +970,16 @@
     if (frozen) {
       freezeScrim.style.display = "block";
       showTopPill("Coach froze the frame · drawing");
+      renderShapes(); // freeze exits the self-view stage (shared still owns it)
       return;
     }
     // Any non-freeze mode: the overlay stays — v2 draws over LIVE video too.
     // Only the freeze scrim drops.
     freezeScrim.style.display = "none";
     if (!cowatchActive) hideTopPill();
+    // Mode flips change what the stage should show even when no stroke
+    // arrives with them (e.g. face -> cowatch with ink still up).
+    renderShapes();
   }
 
   // Clear the telestration overlay + freeze visuals (not co-watch).
@@ -1008,6 +1038,10 @@
         var cimg = document.getElementById("cowatchImage");
         if (cimg && cimg.naturalWidth) { vw = cimg.naturalWidth; vh = cimg.naturalHeight; }
       }
+    } else if (selfStageOn && selfStage.videoWidth) {
+      // Live telestration: the stage is OUR camera — the same frame the coach
+      // drew on, so cs:1 fractions land exactly (the 2026-07-13 skew fix).
+      vw = selfStage.videoWidth; vh = selfStage.videoHeight;
     } else if (remoteVideo && remoteVideo.videoWidth) {
       vw = remoteVideo.videoWidth; vh = remoteVideo.videoHeight;
     }
@@ -1016,7 +1050,40 @@
     var cw = vw * scale, ch = vh * scale;
     return { x: (w - cw) / 2, y: (h - ch) / 2, w: cw, h: ch };
   }
+  // Live-telestration self-view swap (CJ, 2026-07-13): only in face mode, only
+  // while coach strokes are on screen, only if our camera track is publishable.
+  // Camera off or share/cowatch active -> stage stays as-is (legacy mapping).
+  var selfStage = document.getElementById("selfStage");
+  var selfStageOn = false;
+  selfStage.addEventListener("loadedmetadata", function () { renderShapes(); });
+  function updateSelfStage() {
+    var msTrack = null;
+    if (callMode === "face" && !screenShareActive && shapes.length > 0) {
+      var pub = room && room.localParticipant
+        ? room.localParticipant.getTrackPublication(Track.Source.Camera) : null;
+      if (pub && pub.track && !pub.isMuted) msTrack = pub.track.mediaStreamTrack;
+    }
+    var want = !!msTrack;
+    if (want === selfStageOn) return;
+    selfStageOn = want;
+    var pipEl = document.getElementById("pip");
+    if (want) {
+      try { selfStage.srcObject = new MediaStream([msTrack]); } catch (e) {}
+      var p = selfStage.play();
+      if (p && p.catch) p.catch(function () {});
+      remoteWrap.classList.add("telestrate");
+      if (pipEl) pipEl.style.visibility = "hidden";
+      showTopPill("Coach is drawing · this is you");
+    } else {
+      remoteWrap.classList.remove("telestrate");
+      try { selfStage.pause(); } catch (e) {}
+      try { if (selfStage.srcObject) selfStage.srcObject = null; } catch (e) {}
+      if (pipEl) pipEl.style.visibility = "";
+      if (!cowatchActive && callMode !== "freeze") hideTopPill();
+    }
+  }
   function renderShapes() {
+    updateSelfStage();
     while (annoSvg.firstChild) annoSvg.removeChild(annoSvg.firstChild);
     // BAKED-ANNOTATION SUPPRESSION: while a coach screen-share owns the stage,
     // the coach's ink is already in the shared pixels (ReplayKit captured it).
