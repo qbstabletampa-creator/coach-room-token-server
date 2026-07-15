@@ -317,6 +317,12 @@ app.get("/privacy", (_req, res) => {
   res.sendFile(path.join(__dirname, "public", "privacy.html"));
 });
 
+// GET /support — the CoachTime support page (App Store support URL). Same
+// clean-URL pattern as /privacy: defined BEFORE express.static.
+app.get("/support", (_req, res) => {
+  res.sendFile(path.join(__dirname, "public", "support.html"));
+});
+
 // GET /ai + GET /llms.txt — the public AI Onboarding Pack (round-2 spec). A coach
 // pastes the /ai URL into their own Claude/ChatGPT; the AI reads the pack and
 // walks them through setup. Public, unauthenticated, cacheable — same class as
