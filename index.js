@@ -53,6 +53,13 @@ const CLIP_SIGN_TTL_S = Number(process.env.CLIP_SIGN_TTL_S || 7 * 24 * 60 * 60);
 // link dies fast, long enough to absorb "open it in a few minutes".
 const ROOM_TICKET_TTL_MS = 30 * 60 * 1000;
 
+// Phase 1 hardening S3: bound per-room private clip storage usage.
+const ROOM_CLIP_MAX_OBJECTS = Number(process.env.ROOM_CLIP_MAX_OBJECTS || 60);
+const ROOM_CLIP_MAX_BYTES = Number(
+  process.env.ROOM_CLIP_MAX_BYTES || 500 * 1024 * 1024,
+);
+const ROOM_CLIP_USAGE_CACHE_MS = 60 * 1000;
+
 // Payments backbone feature flags (CJ, 2026-07-10). Everything new here is OFF
 // by default so it is completely inert in production until CJ flips the flag.
 //   - CHECKOUT_ENABLED gates POST /checkout/create-session.
@@ -230,10 +237,18 @@ app.use(express.json());
 // (e.g. elcisvvbkwgsypdtlbht.supabase.co.evil.com) are rejected.
 const ALLOWED_PROXY_HOST = "elcisvvbkwgsypdtlbht.supabase.co";
 
+const analyzeProxyLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many proxy requests, slow down." },
+});
+
 // Defined BEFORE express.static. The exact path "/analyze/proxy" never collides
 // with a real static file under public/analyze/ (there is no file named
 // "proxy"), so it does not shadow the analyzer's assets.
-app.get("/analyze/proxy", async (req, res) => {
+app.get("/analyze/proxy", analyzeProxyLimiter, async (req, res) => {
   const raw = req.query.url;
   if (typeof raw !== "string" || !raw) {
     return res.status(400).json({ error: "url query param required" });
@@ -402,6 +417,50 @@ async function requireSupabaseUser(req) {
   const user = await uResp.json();
   if (!user?.id) return { error: "invalid session", status: 401 };
   return { user };
+}
+
+// A valid JWT proves who the caller is, not that they belong in a room. Rooms
+// are either sessions.id or athletes.id; use service-key REST reads so this
+// authorization decision is authoritative and independent of client RLS.
+async function authorizeRoomForUser(userId, room) {
+  const svcHeaders = {
+    apikey: SUPABASE_SERVICE_KEY,
+    authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+  };
+
+  const sResp = await fetch(
+    `${SUPABASE_URL}/rest/v1/sessions?id=eq.${encodeURIComponent(room)}` +
+      `&select=id,coach_id,athlete_id,athletes(user_id)`,
+    { headers: svcHeaders },
+  );
+  if (sResp.ok) {
+    const rows = await sResp.json().catch(() => []);
+    const session = Array.isArray(rows) ? rows[0] : null;
+    if (session) {
+      if (session.coach_id === userId) return true;
+      const athlete = session.athletes;
+      const claimantId = Array.isArray(athlete)
+        ? athlete[0]?.user_id
+        : athlete?.user_id;
+      return Boolean(claimantId && claimantId === userId);
+    }
+  }
+
+  const aResp = await fetch(
+    `${SUPABASE_URL}/rest/v1/athletes?id=eq.${encodeURIComponent(room)}` +
+      `&select=id,coach_id,user_id`,
+    { headers: svcHeaders },
+  );
+  if (aResp.ok) {
+    const rows = await aResp.json().catch(() => []);
+    const athlete = Array.isArray(rows) ? rows[0] : null;
+    if (athlete) {
+      if (athlete.coach_id === userId) return true;
+      if (athlete.user_id && athlete.user_id === userId) return true;
+    }
+  }
+
+  return false;
 }
 
 // ---- Room ticket (server-signed, room-scoped, short-lived) -----------------
@@ -716,6 +775,43 @@ const clipLimiter = rateLimit({
   message: { error: "Too many clip uploads, slow down." },
 });
 
+const _roomClipUsageCache = new Map();
+
+async function roomClipUsage(room) {
+  const cached = _roomClipUsageCache.get(room);
+  if (cached && Date.now() - cached.at < ROOM_CLIP_USAGE_CACHE_MS) {
+    return { count: cached.count, bytes: cached.bytes };
+  }
+  const resp = await fetch(
+    `${SUPABASE_URL}/storage/v1/object/list/${CLIPS_BUCKET}`,
+    {
+      method: "POST",
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ prefix: `${room}/`, limit: 1000, offset: 0 }),
+    },
+  );
+  if (!resp.ok) return null;
+  const rows = await resp.json().catch(() => null);
+  if (!Array.isArray(rows)) return null;
+  let bytes = 0;
+  for (const row of rows) bytes += Number(row?.metadata?.size) || 0;
+  const usage = { count: rows.length, bytes };
+  _roomClipUsageCache.set(room, { at: Date.now(), ...usage });
+  return usage;
+}
+
+function bumpRoomClipUsage(room, addedBytes) {
+  const cached = _roomClipUsageCache.get(room);
+  if (cached) {
+    cached.count += 1;
+    cached.bytes += Number(addedBytes) || 0;
+  }
+}
+
 // ---- on-demand clip re-sign (Phase 0 security) ------------------------------
 // POST /clips/sign  { room, path | filename }  -> { url }
 // Signed clip URLs are short-lived (CLIP_SIGN_TTL_S). Persisting a long-lived
@@ -758,6 +854,10 @@ app.post("/clips/sign", clipSignLimiter, async (req, res) => {
       const authd = await requireSupabaseUser(req);
       if (authd.error) {
         return res.status(authd.status).json({ error: authd.error });
+      }
+      const authorized = await authorizeRoomForUser(authd.user.id, roomStr);
+      if (!authorized) {
+        return res.status(403).json({ error: "not authorized for this room" });
       }
     } else {
       const ticket = req.headers["x-room-ticket"] || req.body.ticket || "";
@@ -811,6 +911,10 @@ app.post(
         if (authd.error) {
           return res.status(authd.status).json({ error: authd.error });
         }
+        const authorized = await authorizeRoomForUser(authd.user.id, room);
+        if (!authorized) {
+          return res.status(403).json({ error: "not authorized for this room" });
+        }
       } else {
         // express.raw consumed the body, so the ticket rides in a header (the
         // browser uploader sends X-Room-Ticket) or a query param fallback.
@@ -852,6 +956,16 @@ app.post(
         png: "image/png",
       };
       const contentType = CONTENT_TYPES[kind];
+
+      const usage = await roomClipUsage(room);
+      if (
+        usage &&
+        (usage.count >= ROOM_CLIP_MAX_OBJECTS ||
+          usage.bytes + body.length > ROOM_CLIP_MAX_BYTES)
+      ) {
+        return res.status(429).json({ error: "room clip storage limit reached" });
+      }
+
       const objectPath = `${room}/${Date.now()}-${Math.random()
         .toString(36)
         .slice(2, 8)}.${ext}`;
@@ -874,6 +988,8 @@ app.post(
         console.error("[token-server] clip upload failed:", up.status, detail);
         return res.status(502).json({ error: "storage upload failed" });
       }
+
+      bumpRoomClipUsage(room, body.length);
 
       // ---- SIGNED URL (Phase 0): no world-readable /object/public/ URL -------
       const signedUrl = await signClipUrl(objectPath);
@@ -912,7 +1028,15 @@ async function lookupClaim(token) {
   return rows && rows[0] ? rows[0] : null;
 }
 
-app.get("/claim/:token", async (req, res) => {
+const claimGetLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many requests, slow down." },
+});
+
+app.get("/claim/:token", claimGetLimiter, async (req, res) => {
   const token = req.params.token || "";
   if (!UUID_RE.test(token) || !SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
     return res.status(400).type("html").send(invalidRoomPage());
@@ -1075,6 +1199,10 @@ app.post("/room-ticket", ticketLimiter, async (req, res) => {
     if (authd.error) {
       return res.status(authd.status).json({ error: authd.error });
     }
+    const authorized = await authorizeRoomForUser(authd.user.id, String(room));
+    if (!authorized) {
+      return res.status(403).json({ error: "not authorized for this room" });
+    }
     const ticket = mintRoomTicket(String(room));
     if (!ticket) {
       return res.status(503).json({ error: "room tickets not configured" });
@@ -1140,14 +1268,16 @@ app.post("/token", tokenLimiter, async (req, res) => {
         return res.status(authd.status).json({ error: authd.error });
       }
       const user = authd.user;
-      // Role from the verified user's metadata. A coach is whoever the app
-      // marks as such (user_metadata.role === "coach"); everyone else is an
-      // athlete. This comes from the trusted /auth/v1/user response, NOT the
-      // request body, so it cannot be spoofed by the client.
-      const claimedRole =
-        user.user_metadata?.role || user.app_metadata?.role || null;
+      // app_metadata is server-controlled. user_metadata is end-user writable
+      // and must never be accepted as proof of the coach role.
+      const claimedRole = user.app_metadata?.role || null;
       role = claimedRole === "coach" ? "coach" : "athlete";
       identity = `${role}-${user.id}`;
+
+      const authorized = await authorizeRoomForUser(user.id, roomStr);
+      if (!authorized) {
+        return res.status(403).json({ error: "not authorized for this room" });
+      }
     } else {
       // Path (b): room ticket for a no-signup browser athlete.
       const ticketRoom = verifyRoomTicket(ticket, roomStr);
@@ -1219,15 +1349,9 @@ const dataLimiter = rateLimit({
 // IGNORED: this server only ever carries ct.v1, so the topic is forced
 // server-side and a client-supplied topic is never trusted.
 //
-// Sender-role gating (coach-only / session-owner) is intentionally NOT enforced
-// here yet: it matches the CURRENT LiveKit grant surface. /token grants
-// canPublishData:true to ANY authed participant (coach or athlete), so any
-// authed participant can already publishData into the room today. This relay
-// deliberately mirrors that surface — a valid Supabase JWT is required (hard 401
-// without one), nothing narrower.
-// TODO(feat/phase1-hardening): when that branch's sender gate deploys (only a
-// coach / session owner may publish ct.v1), add the SAME check here so the relay
-// can't be used to bypass it. This comment marks the merge point.
+// The relay is coach-authoritative: the caller must belong to this room and the
+// verified Supabase user must carry app_metadata.role="coach". user_metadata is
+// deliberately ignored because an end user can edit it themselves.
 app.post("/data", dataLimiter, async (req, res) => {
   try {
     const { room, payload } = req.body || {};
@@ -1247,6 +1371,16 @@ app.post("/data", dataLimiter, async (req, res) => {
     const authd = await requireSupabaseUser(req);
     if (authd.error) {
       return res.status(authd.status).json({ ok: false, error: authd.error });
+    }
+
+    const authorized = await authorizeRoomForUser(authd.user.id, roomStr);
+    if (!authorized) {
+      return res
+        .status(403)
+        .json({ ok: false, error: "not authorized for this room" });
+    }
+    if (authd.user.app_metadata?.role !== "coach") {
+      return res.status(403).json({ ok: false, error: "coach role required" });
     }
 
     // `payload` must be a non-empty standard-base64 string of the message bytes.
@@ -1585,6 +1719,7 @@ if (require.main === module) {
 
 module.exports = {
   app, // exported so tests can drive routes over an ephemeral port (no live creds)
+  roomService, // test seam for POST /data; never exposed over HTTP
   sniffVideoMagic,
   mintRoomTicket,
   verifyRoomTicket,

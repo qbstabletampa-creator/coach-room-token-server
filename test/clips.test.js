@@ -17,6 +17,7 @@ process.env.CLIPS_BUCKET = "clips-private";
 
 const {
   app,
+  roomService,
   sniffVideoMagic,
   mintRoomTicket,
   verifyRoomTicket,
@@ -52,6 +53,7 @@ function request(port, { method = "GET", path = "/", headers = {}, body } = {}) 
         res.on("end", () =>
           resolve({
             status: res.statusCode,
+            headers: res.headers,
             json: (() => {
               try {
                 return JSON.parse(data);
@@ -225,6 +227,383 @@ test("POST /clips/sign returns 401 with NO JWT and NO room ticket", async () => 
   }
 });
 
+// ============================================================================
+// Phase 1 hardening tests (S1 role source, S2 room authorization, S5 grant)
+// ============================================================================
+
+// A minimal MP4 ftyp header so req body sniffs as an mp4 clip (reused from the
+// magic-byte tests above).
+const MP4_BYTES = Buffer.from([
+  0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x6d, 0x70, 0x34, 0x32,
+]);
+
+// Decode a JWT's payload (middle segment) WITHOUT verifying — the test only
+// inspects the claims the server put in, not the signature.
+function decodeJwtPayload(jwt) {
+  const parts = String(jwt).split(".");
+  assert.strictEqual(parts.length, 3, "a real JWT has three dot-separated parts");
+  return JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+}
+
+// Build a global.fetch mock for the /token JWT path: it answers /auth/v1/user
+// with the given user, and answers the S2 authorization lookups so that `user`
+// is treated as the OWNER of `room` (coach_id === user.id on the session).
+// This keeps the S1 identity tests green both before and after S2 lands.
+function mockUserOwnsRoom(user, room) {
+  return async (url) => {
+    const u = String(url);
+    if (u.includes("/auth/v1/user")) {
+      return { ok: true, json: async () => user };
+    }
+    if (u.includes("/rest/v1/sessions")) {
+      return {
+        ok: true,
+        json: async () => [
+          { id: room, coach_id: user.id, athlete_id: "ath-owned", athletes: { user_id: null } },
+        ],
+      };
+    }
+    if (u.includes("/rest/v1/athletes")) {
+      return { ok: true, json: async () => [] };
+    }
+    return { ok: true, json: async () => ({}) };
+  };
+}
+
+// ---- S1: coach role is derived from app_metadata ONLY ----------------------
+
+test("S1: user_metadata.role='coach' does NOT grant a coach identity (athlete-)", async () => {
+  const { server, port } = await startServer();
+  const realFetch = global.fetch;
+  const user = {
+    id: "u-meta-coach",
+    user_metadata: { role: "coach" }, // client-writable — must be ignored
+    app_metadata: {},
+  };
+  global.fetch = mockUserOwnsRoom(user, "room-s1a");
+  try {
+    const res = await request(port, {
+      method: "POST",
+      path: "/token",
+      headers: { authorization: "Bearer good-jwt" },
+      body: JSON.stringify({ room: "room-s1a", identity: "coach-HACKER" }),
+    });
+    assert.strictEqual(res.status, 200, "authorized owner mints a token");
+    const payload = decodeJwtPayload(res.json.token);
+    assert.ok(
+      String(payload.sub).startsWith("athlete-"),
+      `user_metadata.role must not promote: got sub=${payload.sub}`,
+    );
+    assert.strictEqual(payload.sub, "athlete-u-meta-coach");
+  } finally {
+    global.fetch = realFetch;
+    server.close();
+  }
+});
+
+test("S1: app_metadata.role='coach' DOES grant a coach identity (coach-)", async () => {
+  const { server, port } = await startServer();
+  const realFetch = global.fetch;
+  const user = {
+    id: "u-app-coach",
+    user_metadata: {},
+    app_metadata: { role: "coach" }, // server-controlled — the real signal
+  };
+  global.fetch = mockUserOwnsRoom(user, "room-s1b");
+  try {
+    const res = await request(port, {
+      method: "POST",
+      path: "/token",
+      headers: { authorization: "Bearer good-jwt" },
+      body: JSON.stringify({ room: "room-s1b" }),
+    });
+    assert.strictEqual(res.status, 200);
+    const payload = decodeJwtPayload(res.json.token);
+    assert.strictEqual(payload.sub, "coach-u-app-coach");
+  } finally {
+    global.fetch = realFetch;
+    server.close();
+  }
+});
+
+// ---- S2: room-level authorization on /token (JWT path) + /room-ticket -------
+
+// Build a fetch mock where /auth/v1/user returns `user`, and the sessions /
+// athletes lookups return whatever rows the scenario supplies (empty by default).
+function mockAuthz(user, { sessionRows = [], athleteRows = [] } = {}) {
+  return async (url) => {
+    const u = String(url);
+    if (u.includes("/auth/v1/user")) return { ok: true, json: async () => user };
+    if (u.includes("/rest/v1/sessions")) return { ok: true, json: async () => sessionRows };
+    if (u.includes("/rest/v1/athletes")) return { ok: true, json: async () => athleteRows };
+    return { ok: true, json: async () => ({}) };
+  };
+}
+
+test("S2: coach who owns the session mints (200)", async () => {
+  const { server, port } = await startServer();
+  const realFetch = global.fetch;
+  const user = { id: "coach-1", app_metadata: { role: "coach" } };
+  global.fetch = mockAuthz(user, {
+    sessionRows: [{ id: "room-own", coach_id: "coach-1", athlete_id: "a1", athletes: { user_id: null } }],
+  });
+  try {
+    const res = await request(port, {
+      method: "POST",
+      path: "/token",
+      headers: { authorization: "Bearer good-jwt" },
+      body: JSON.stringify({ room: "room-own" }),
+    });
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(decodeJwtPayload(res.json.token).sub, "coach-coach-1");
+  } finally {
+    global.fetch = realFetch;
+    server.close();
+  }
+});
+
+test("S2: coach minting for a FOREIGN room is refused (403)", async () => {
+  const { server, port } = await startServer();
+  const realFetch = global.fetch;
+  const user = { id: "coach-1", app_metadata: { role: "coach" } };
+  // The room exists but belongs to a different coach; no matching athlete row.
+  global.fetch = mockAuthz(user, {
+    sessionRows: [{ id: "room-foreign", coach_id: "coach-2", athlete_id: "a9", athletes: { user_id: "someone-else" } }],
+  });
+  try {
+    const res = await request(port, {
+      method: "POST",
+      path: "/token",
+      headers: { authorization: "Bearer good-jwt" },
+      body: JSON.stringify({ room: "room-foreign" }),
+    });
+    assert.strictEqual(res.status, 403);
+    assert.match(res.json.error, /not authorized/);
+  } finally {
+    global.fetch = realFetch;
+    server.close();
+  }
+});
+
+test("S2: coach who owns the athlete card mints (Go Live fallback, 200)", async () => {
+  const { server, port } = await startServer();
+  const realFetch = global.fetch;
+  const user = { id: "coach-1", app_metadata: { role: "coach" } };
+  // Room is an athlete id (no session yet): sessions lookup empty, athletes owned.
+  global.fetch = mockAuthz(user, {
+    sessionRows: [],
+    athleteRows: [{ id: "ath-room", coach_id: "coach-1", user_id: null }],
+  });
+  try {
+    const res = await request(port, {
+      method: "POST",
+      path: "/token",
+      headers: { authorization: "Bearer good-jwt" },
+      body: JSON.stringify({ room: "ath-room" }),
+    });
+    assert.strictEqual(res.status, 200);
+  } finally {
+    global.fetch = realFetch;
+    server.close();
+  }
+});
+
+test("S2: claimed athlete on the session mints (200)", async () => {
+  const { server, port } = await startServer();
+  const realFetch = global.fetch;
+  const user = { id: "athlete-user-1", app_metadata: {} };
+  // Session belongs to a coach, but its athlete is claimed by this user.
+  global.fetch = mockAuthz(user, {
+    sessionRows: [{ id: "room-sess", coach_id: "coach-9", athlete_id: "a1", athletes: { user_id: "athlete-user-1" } }],
+  });
+  try {
+    const res = await request(port, {
+      method: "POST",
+      path: "/token",
+      headers: { authorization: "Bearer good-jwt" },
+      body: JSON.stringify({ room: "room-sess" }),
+    });
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(decodeJwtPayload(res.json.token).sub, "athlete-athlete-user-1");
+  } finally {
+    global.fetch = realFetch;
+    server.close();
+  }
+});
+
+test("S2: athlete minting for a foreign session is refused (403)", async () => {
+  const { server, port } = await startServer();
+  const realFetch = global.fetch;
+  const user = { id: "athlete-user-1", app_metadata: {} };
+  // Session's athlete is claimed by someone else, and no athlete row matches.
+  global.fetch = mockAuthz(user, {
+    sessionRows: [{ id: "room-other", coach_id: "coach-9", athlete_id: "a2", athletes: { user_id: "different-athlete" } }],
+  });
+  try {
+    const res = await request(port, {
+      method: "POST",
+      path: "/token",
+      headers: { authorization: "Bearer good-jwt" },
+      body: JSON.stringify({ room: "room-other" }),
+    });
+    assert.strictEqual(res.status, 403);
+  } finally {
+    global.fetch = realFetch;
+    server.close();
+  }
+});
+
+test("S2: the /token room-ticket path is untouched (guest still mints, no authz lookup)", async () => {
+  const { server, port } = await startServer();
+  const realFetch = global.fetch;
+  // If the ticket path wrongly reached the DB authz check this mock would throw.
+  global.fetch = async (url) => {
+    throw new Error(`ticket path must not hit Supabase: ${url}`);
+  };
+  try {
+    const ticket = mintRoomTicket("room-guest");
+    const res = await request(port, {
+      method: "POST",
+      path: "/token",
+      body: JSON.stringify({ room: "room-guest", ticket }),
+    });
+    assert.strictEqual(res.status, 200, "valid room ticket still mints a guest token");
+    assert.ok(decodeJwtPayload(res.json.token).sub.startsWith("guest-"));
+  } finally {
+    global.fetch = realFetch;
+    server.close();
+  }
+});
+
+test("S2: /room-ticket minting for a foreign room is refused (403)", async () => {
+  const { server, port } = await startServer();
+  const realFetch = global.fetch;
+  const user = { id: "coach-1", app_metadata: { role: "coach" } };
+  global.fetch = mockAuthz(user, {
+    sessionRows: [{ id: "room-foreign", coach_id: "coach-2", athlete_id: "a9", athletes: { user_id: null } }],
+  });
+  try {
+    const res = await request(port, {
+      method: "POST",
+      path: "/room-ticket",
+      headers: { authorization: "Bearer good-jwt" },
+      body: JSON.stringify({ room: "room-foreign" }),
+    });
+    assert.strictEqual(res.status, 403);
+  } finally {
+    global.fetch = realFetch;
+    server.close();
+  }
+});
+
+// ---- S3: rate limiters on GET /analyze/proxy and GET /claim/:token ----------
+// A wired express-rate-limit middleware sets RateLimit-* headers (standardHeaders)
+// on every response, so their presence proves the limiter is in the chain.
+
+test("S3: GET /analyze/proxy is rate-limited (RateLimit headers present)", async () => {
+  const { server, port } = await startServer();
+  try {
+    // No url param -> 400, but the limiter runs before the handler and sets headers.
+    const res = await request(port, { path: "/analyze/proxy" });
+    assert.strictEqual(res.status, 400);
+    assert.ok(res.headers["ratelimit-limit"], "proxy limiter sets RateLimit-Limit");
+  } finally {
+    server.close();
+  }
+});
+
+test("S3: GET /claim/:token is rate-limited (RateLimit headers present)", async () => {
+  const { server, port } = await startServer();
+  try {
+    const res = await request(port, { path: "/claim/not-a-uuid" });
+    assert.strictEqual(res.status, 400);
+    assert.ok(res.headers["ratelimit-limit"], "claim GET limiter sets RateLimit-Limit");
+  } finally {
+    server.close();
+  }
+});
+
+// ---- S3: per-room clip storage quota ---------------------------------------
+
+test("S3: POST /clips/:room returns 429 when the room prefix is at the object cap", async () => {
+  const { server, port } = await startServer();
+  const realFetch = global.fetch;
+  let uploaded = false;
+  global.fetch = async (url, opts = {}) => {
+    const u = String(url);
+    // roomClipUsage lists the prefix -> return 60 objects (at ROOM_CLIP_MAX_OBJECTS).
+    if (u.includes("/storage/v1/object/list/")) {
+      const rows = Array.from({ length: 60 }, (_, i) => ({
+        name: `${i}.mp4`,
+        metadata: { size: 1000 },
+      }));
+      return { ok: true, json: async () => rows };
+    }
+    // The actual object write must NOT be reached once the quota trips.
+    if (opts.method === "POST" && u.includes("/storage/v1/object/")) {
+      uploaded = true;
+      return { ok: true, text: async () => "" };
+    }
+    return { ok: true, json: async () => ({}) };
+  };
+  try {
+    const ticket = mintRoomTicket("room-quota");
+    const res = await request(port, {
+      method: "POST",
+      path: "/clips/room-quota",
+      headers: { "x-room-ticket": ticket, "content-type": "video/mp4" },
+      body: MP4_BYTES,
+    });
+    assert.strictEqual(res.status, 429, "at the object cap -> 429");
+    assert.match(res.json.error, /storage limit/);
+    assert.strictEqual(uploaded, false, "no object is written when the quota trips");
+  } finally {
+    global.fetch = realFetch;
+    server.close();
+  }
+});
+
+// ---- S5: /token grant-decode (the security keystone) -----------------------
+// Decode the minted LiveKit JWT and lock its shape: room-scoped grant, identity
+// derived from the Supabase user (never the client-supplied identity), and no
+// admin/create powers.
+
+test("S5: minted /token JWT is room-scoped, identity is server-derived, no roomAdmin", async () => {
+  const { server, port } = await startServer();
+  const realFetch = global.fetch;
+  const user = { id: "keystone-uid", app_metadata: { role: "coach" } };
+  global.fetch = mockUserOwnsRoom(user, "room-keystone");
+  try {
+    const res = await request(port, {
+      method: "POST",
+      path: "/token",
+      headers: { authorization: "Bearer good-jwt" },
+      // Client tries to pick its own identity — the server must ignore it.
+      body: JSON.stringify({ room: "room-keystone", identity: "coach-ATTACKER" }),
+    });
+    assert.strictEqual(res.status, 200);
+
+    const payload = decodeJwtPayload(res.json.token);
+    const grant = payload.video || {};
+
+    // Room-scoped: the grant is pinned to the requested room only.
+    assert.strictEqual(grant.room, "room-keystone", "grant is room-scoped");
+    assert.strictEqual(grant.roomJoin, true, "roomJoin granted for the call");
+
+    // Identity is derived server-side from the Supabase user, NOT req.body.identity.
+    assert.strictEqual(payload.sub, "coach-keystone-uid", "identity is server-derived");
+    assert.notStrictEqual(payload.sub, "coach-ATTACKER", "client-supplied identity is ignored");
+
+    // No elevated powers: a leaked token cannot administer or create rooms.
+    assert.ok(!grant.roomAdmin, "no roomAdmin grant");
+    assert.ok(!grant.roomCreate, "no roomCreate grant");
+    assert.ok(!grant.roomList, "no roomList grant");
+  } finally {
+    global.fetch = realFetch;
+    server.close();
+  }
+});
+
 test("POST /clips/sign returns 401 with a ticket for a DIFFERENT room", async () => {
   const { server, port } = await startServer();
   try {
@@ -286,6 +665,14 @@ test("POST /clips/sign with a valid Supabase JWT signs the clip", async () => {
     if (u.includes("/auth/v1/user")) {
       return { ok: true, json: async () => ({ id: "user-1" }) };
     }
+    if (u.includes("/rest/v1/sessions")) {
+      return {
+        ok: true,
+        json: async () => [
+          { id: "room-abc", coach_id: "user-1", athletes: { user_id: null } },
+        ],
+      };
+    }
     return {
       ok: true,
       json: async () => ({
@@ -321,6 +708,140 @@ test("POST /clips/sign returns 401 for a bad/expired JWT (no silent fallthrough)
     });
     assert.strictEqual(res.status, 401);
   } finally {
+    global.fetch = realFetch;
+    server.close();
+  }
+});
+
+// ---- M1: clip JWT paths are bound to room membership ----------------------
+
+test("M1: non-member JWT cannot sign a clip for a foreign room (403)", async () => {
+  const { server, port } = await startServer();
+  const realFetch = global.fetch;
+  const user = { id: "clip-outsider", app_metadata: { role: "coach" } };
+  global.fetch = mockAuthz(user, {
+    sessionRows: [
+      { id: "room-clips", coach_id: "other-coach", athletes: { user_id: "other-athlete" } },
+    ],
+  });
+  try {
+    const res = await request(port, {
+      method: "POST",
+      path: "/clips/sign",
+      headers: { authorization: "Bearer good-jwt" },
+      body: JSON.stringify({ room: "room-clips", filename: "rep.mp4" }),
+    });
+    assert.strictEqual(res.status, 403);
+    assert.match(res.json.error, /not authorized/);
+  } finally {
+    global.fetch = realFetch;
+    server.close();
+  }
+});
+
+test("M1: non-member JWT cannot upload to a foreign room (403)", async () => {
+  const { server, port } = await startServer();
+  const realFetch = global.fetch;
+  const user = { id: "clip-outsider", app_metadata: { role: "coach" } };
+  global.fetch = mockAuthz(user, {
+    sessionRows: [
+      { id: "room-clips", coach_id: "other-coach", athletes: { user_id: "other-athlete" } },
+    ],
+  });
+  try {
+    const res = await request(port, {
+      method: "POST",
+      path: "/clips/room-clips",
+      headers: { authorization: "Bearer good-jwt", "content-type": "video/mp4" },
+      body: MP4_BYTES,
+    });
+    assert.strictEqual(res.status, 403);
+    assert.match(res.json.error, /not authorized/);
+  } finally {
+    global.fetch = realFetch;
+    server.close();
+  }
+});
+
+// ---- M2: HTTPS data relay is room-authorized and coach-only ----------------
+
+const DATA_PAYLOAD = Buffer.from(JSON.stringify({ v: 2, t: "mode", mode: "face" }))
+  .toString("base64");
+
+async function requestDataRelay(port) {
+  return request(port, {
+    method: "POST",
+    path: "/data",
+    headers: { authorization: "Bearer good-jwt" },
+    body: JSON.stringify({ room: "room-data", payload: DATA_PAYLOAD }),
+  });
+}
+
+test("M2: non-member coach cannot relay into a foreign room (403)", async () => {
+  const { server, port } = await startServer();
+  const realFetch = global.fetch;
+  global.fetch = mockAuthz(
+    { id: "coach-outsider", app_metadata: { role: "coach" } },
+    {
+      sessionRows: [
+        { id: "room-data", coach_id: "coach-owner", athletes: { user_id: "athlete-member" } },
+      ],
+    },
+  );
+  try {
+    const res = await requestDataRelay(port);
+    assert.strictEqual(res.status, 403);
+    assert.match(res.json.error, /not authorized/);
+  } finally {
+    global.fetch = realFetch;
+    server.close();
+  }
+});
+
+test("M2: room-member athlete cannot use the coach relay (403)", async () => {
+  const { server, port } = await startServer();
+  const realFetch = global.fetch;
+  global.fetch = mockAuthz(
+    { id: "athlete-member", app_metadata: {} },
+    {
+      sessionRows: [
+        { id: "room-data", coach_id: "coach-owner", athletes: { user_id: "athlete-member" } },
+      ],
+    },
+  );
+  try {
+    const res = await requestDataRelay(port);
+    assert.strictEqual(res.status, 403);
+    assert.match(res.json.error, /coach role required/);
+  } finally {
+    global.fetch = realFetch;
+    server.close();
+  }
+});
+
+test("M2: room-authorized app_metadata coach can relay (200)", async () => {
+  const { server, port } = await startServer();
+  const realFetch = global.fetch;
+  const realSendData = roomService.sendData;
+  const calls = [];
+  global.fetch = mockAuthz(
+    { id: "coach-owner", user_metadata: { role: "athlete" }, app_metadata: { role: "coach" } },
+    {
+      sessionRows: [
+        { id: "room-data", coach_id: "coach-owner", athletes: { user_id: "athlete-member" } },
+      ],
+    },
+  );
+  roomService.sendData = async (...args) => calls.push(args);
+  try {
+    const res = await requestDataRelay(port);
+    assert.strictEqual(res.status, 200);
+    assert.deepStrictEqual(res.json, { ok: true });
+    assert.strictEqual(calls.length, 1, "relay reaches LiveKit once");
+    assert.strictEqual(calls[0][0], "room-data");
+    assert.strictEqual(calls[0][3].topic, "ct.v1");
+  } finally {
+    roomService.sendData = realSendData;
     global.fetch = realFetch;
     server.close();
   }

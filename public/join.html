@@ -746,7 +746,7 @@
     r.on(RoomEvent.DataReceived, function (payload, participant, kind, topic) {
       if (topic && topic !== CALL_TOPIC) return;
       var msg = decodeMessage(payload);
-      if (msg) handleCallMessage(msg);
+      if (msg) handleCallMessage(msg, participant);
     });
 
     r.on(RoomEvent.Disconnected, function () {
@@ -780,7 +780,7 @@
   function decodeMessage(payload) {
     try {
       var parsed = JSON.parse(decoder.decode(payload));
-      if (parsed && (parsed.v === 1 || parsed.v === 2) && typeof parsed.t === "string") return parsed;
+      if (parsed && parsed.v === 2 && typeof parsed.t === "string") return parsed;
       return null;
     } catch (e) { return null; }
   }
@@ -881,7 +881,12 @@
   }
 
   var lastCoachSeq = 0;
-  function handleCallMessage(msg) {
+  function handleCallMessage(msg, sender) {
+    // Act only on server-derived coach identities. Trust the participant object
+    // LiveKit supplies, never a sender/id field inside the peer payload.
+    var id = sender && typeof sender.identity === "string" ? sender.identity : "";
+    if (id.indexOf("coach-") !== 0) return;
+
     // Cross-transport dedup (2026-07-03): the coach stamps a monotonic `seq`
     // on every message because a timed-out P2P send can flush LATE after the
     // HTTPS relay already delivered it — a duplicate or stale draw:undo would
@@ -935,8 +940,8 @@
       case "clip:stop":
         finishClipRecording();
         break;
-      case "clip:freeze":
-        captureFreezeFrame(msg);
+      case "ticket:refresh":
+        applyTicketRefresh(msg.ticket);
         break;
       case "cowatch:load":
         loadCowatch(msg);
@@ -965,17 +970,7 @@
   // ---------------- Mode awareness ----------------
   function applyMode(mode) {
     callMode = mode;
-    var frozen = (mode === "freeze");
-    // Freeze: dim the live frame + show the drawing pill, KEEP strokes.
-    if (frozen) {
-      freezeScrim.style.display = "block";
-      showTopPill("Coach froze the frame · drawing");
-      renderShapes(); // freeze exits the self-view stage (shared still owns it)
-      return;
-    }
-    // Any non-freeze mode: the overlay stays — v2 draws over LIVE video too.
-    // Only the freeze scrim drops.
-    freezeScrim.style.display = "none";
+    // The annotation overlay stays across every mode — v2 draws over live video.
     if (!cowatchActive) hideTopPill();
     // Mode flips change what the stage should show even when no stroke
     // arrives with them (e.g. face -> cowatch with ink still up).
@@ -1551,84 +1546,13 @@
     cleanupRecorder();
   }
 
-  // ---------------- Draw-to-freeze (the shared still) ----------------
-  // The coach arms the pen during a LIVE call; we grab ONE frame from our OWN
-  // camera (not a recording), upload it as a JPEG through the SAME lane as the
-  // rep clip, and answer clip:ready{kind:'image'}. The coach then loads it as a
-  // shared still both sides annotate over.
-  //
-  // CROSS-BROWSER: we do NOT use ImageCapture.grabFrame() (Safari/iOS has no
-  // ImageCapture). Instead we attach the camera MediaStreamTrack to a transient
-  // hidden <video>, wait for loadedmetadata, and drawImage it onto a <canvas>.
-  async function captureFreezeFrame(msg) {
-    var freezeId = clampStr(msg.id, 64);
-    var pub = room && room.localParticipant ? room.localParticipant.getTrackPublication(Track.Source.Camera) : null;
-    var msTrack = pub && pub.track ? pub.track.mediaStreamTrack : null;
-    if (!msTrack) {
-      sendData({ v: 2, t: "clip:error", id: freezeId, reason: "camera not available" });
-      return;
-    }
-    var vid = document.createElement("video");
-    vid.muted = true;
-    vid.playsInline = true;
-    vid.setAttribute("playsinline", "");
-    vid.style.position = "fixed";
-    vid.style.left = "-9999px";
-    vid.style.width = "1px";
-    vid.style.height = "1px";
-    var stream = new MediaStream([msTrack]);
-    vid.srcObject = stream;
-    document.body.appendChild(vid);
-
-    function cleanup() {
-      try { vid.pause(); } catch (e) {}
-      vid.srcObject = null;
-      if (vid.parentNode) vid.parentNode.removeChild(vid);
-    }
-
-    var done = false;
-    function fail(reason) {
-      if (done) return;
-      done = true;
-      cleanup();
-      sendData({ v: 2, t: "clip:error", id: freezeId, reason: reason });
-    }
-
-    vid.onloadedmetadata = function () {
-      var pr = vid.play();
-      if (pr && pr.catch) pr.catch(function () {});
-      // One rAF after metadata gives the first frame time to paint.
-      requestAnimationFrame(function () {
-        if (done) return;
-        var w = vid.videoWidth || 0, h = vid.videoHeight || 0;
-        if (!w || !h) { fail("no video frame"); return; }
-        var canvas = document.createElement("canvas");
-        canvas.width = w;
-        canvas.height = h;
-        var ctx = canvas.getContext("2d");
-        if (!ctx) { fail("canvas unsupported"); return; }
-        try {
-          ctx.drawImage(vid, 0, 0, w, h);
-        } catch (e) {
-          fail("frame capture failed");
-          return;
-        }
-        canvas.toBlob(function (blob) {
-          if (done) return;
-          if (!blob || !blob.size) { fail("empty frame"); return; }
-          done = true;
-          cleanup();
-          uploadBlob(blob, "image/jpeg").then(function (url) {
-            sendData({ v: 2, t: "clip:ready", id: freezeId, url: url, kind: "image", durationS: 0 });
-          }).catch(function (e) {
-            sendData({ v: 2, t: "clip:error", id: freezeId, reason: (e && e.message) || "freeze upload failed" });
-          });
-        }, "image/jpeg", 0.9);
-      });
-    };
-    vid.onerror = function () { fail("camera frame error"); };
-    // Safety net: never leave the hidden video orphaned if metadata never fires.
-    setTimeout(function () { fail("freeze timed out"); }, 8000);
+  // Calls can outlive the 30-minute room ticket. Accept a bounded refresh only
+  // through the coach-gated control-message path above.
+  function applyTicketRefresh(ticket) {
+    var next = clampStr(ticket, 4000);
+    if (!next) return;
+    roomTicket = next;
+    try { sessionStorage.setItem(TICKET_KEY, next); } catch (e) {}
   }
 
   // ---------------- Top pill ----------------
