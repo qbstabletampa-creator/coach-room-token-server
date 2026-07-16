@@ -52,6 +52,12 @@ const {
 } = require("./lib/reminder-settings");
 const { buildRemindersHandler } = require("./lib/reminders");
 // COMPARE_GAP:REMINDERS:IMPORT:END
+// COMPARE_GAP:COACH_PAGE:IMPORT:BEGIN
+const {
+  buildCoachPageHandlers,
+  readPublicCoachPage,
+} = require("./lib/coach-page");
+// COMPARE_GAP:COACH_PAGE:IMPORT:END
 const { buildAccountDeleteHandler } = require("./lib/account-delete");
 // Open API + MCP layer (build brief: feat/open-api-mcp). Additive; every route
 // below is gated by API_ENABLED (default OFF), so requiring these here is inert
@@ -156,6 +162,9 @@ const CALENDAR_SYNC_ENABLED = envFlag("CALENDAR_SYNC_ENABLED");
 // COMPARE_GAP:REMINDERS:FLAG:BEGIN
 const REMINDERS_EDITOR_ENABLED = envFlag("REMINDERS_EDITOR_ENABLED");
 // COMPARE_GAP:REMINDERS:FLAG:END
+// COMPARE_GAP:COACH_PAGE:FLAG:BEGIN
+const COACH_PAGE_ENABLED = envFlag("COACH_PAGE_ENABLED");
+// COMPARE_GAP:COACH_PAGE:FLAG:END
 // API_ENABLED gates the entire open API + MCP surface: the /api/v1 REST cluster
 // and the /mcp MCP endpoint (plus the /mcp body carve-out below). OFF by default
 // so the whole layer ships dark — completely inert in production until CJ flips
@@ -1750,6 +1759,12 @@ if (SCHEDULING_ENABLED) {
     // The owed-charge log belongs to the PAYMENTS_ENABLED coach_charges model;
     // checkout/webhook flags govern different Stripe provisioning lanes.
     guestCharge: PAYMENTS_ENABLED ? createCharge : null,
+    // COMPARE_GAP:COACH_PAGE:STOREFRONT_WIRING:BEGIN
+    coachPagePublicReader: COACH_PAGE_ENABLED ? readPublicCoachPage : null,
+    coachPageTemplatePath: COACH_PAGE_ENABLED
+      ? path.join(__dirname, "views", "coach-page.html")
+      : null,
+    // COMPARE_GAP:COACH_PAGE:STOREFRONT_WIRING:END
   });
   app.get("/coach/:slug", scheduleReadLimiter, storefront.getCoachPage);
   app.get("/coach/:slug/data", scheduleReadLimiter, storefront.getCoachData);
@@ -1948,6 +1963,40 @@ if (REMINDERS_EDITOR_ENABLED) {
   app.patch("/reminders/settings", remindersWriteLimiter, reminders.patchSettings);
 }
 // COMPARE_GAP:REMINDERS:ROUTES:END
+// COMPARE_GAP:COACH_PAGE:ROUTES:BEGIN
+if (COACH_PAGE_ENABLED) {
+  const coachPageReadLimiter = rateLimit({
+    windowMs: 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false,
+    message: { error: "too_many_requests" },
+  });
+  const coachPageWriteLimiter = rateLimit({
+    windowMs: 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false,
+    message: { error: "too_many_requests" },
+  });
+  const coachPageUploadLimiter = rateLimit({
+    windowMs: 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false,
+    message: { error: "too_many_requests" },
+  });
+  const coachPage = buildCoachPageHandlers({ requireSupabaseUser });
+  app.get("/coach-page", coachPageReadLimiter, coachPage.getCoachPage);
+  app.patch("/coach-page", coachPageWriteLimiter, coachPage.patchProfile);
+  app.post("/coach-page/locations", coachPageWriteLimiter, coachPage.postLocation);
+  app.patch("/coach-page/locations/:id", coachPageWriteLimiter, coachPage.patchLocation);
+  app.delete("/coach-page/locations/:id", coachPageWriteLimiter, coachPage.deleteLocation);
+  app.post(
+    "/coach-page/gallery",
+    coachPageUploadLimiter,
+    express.raw({ type: ["image/jpeg", "image/png", "image/webp"], limit: "8mb" }),
+    coachPage.postPhoto,
+  );
+  app.patch("/coach-page/gallery/:id", coachPageWriteLimiter, coachPage.patchPhoto);
+  app.delete("/coach-page/gallery/:id", coachPageWriteLimiter, coachPage.deletePhoto);
+  app.post("/coach-page/socials", coachPageWriteLimiter, coachPage.postSocial);
+  app.patch("/coach-page/socials/:id", coachPageWriteLimiter, coachPage.patchSocial);
+  app.delete("/coach-page/socials/:id", coachPageWriteLimiter, coachPage.deleteSocial);
+  app.put("/coach-page/sections", coachPageWriteLimiter, coachPage.putSections);
+}
+// COMPARE_GAP:COACH_PAGE:ROUTES:END
 
 // ---- Round-2 bulk athlete import (additive, env-flag guarded OFF by default) --
 // POST /coach/athletes/import — paste a roster, one tap imports everyone + returns
@@ -2202,6 +2251,10 @@ module.exports = {
   buildReminderSettingsHandlers,
   buildReminderRulesProvider,
   // COMPARE_GAP:REMINDERS:EXPORT:END
+  // COMPARE_GAP:COACH_PAGE:EXPORT:BEGIN
+  buildCoachPageHandlers,
+  readPublicCoachPage,
+  // COMPARE_GAP:COACH_PAGE:EXPORT:END
   // Round-2 dashboard + import (additive, foundation stubs). Exported for unit
   // tests + the feature builders that fill the internals.
   buildDashboardHandlers,

@@ -43,10 +43,14 @@ test("factory remains inert in a fresh flag-off process", () => {
   assert.equal(child.status, 0, child.stderr); assert.deepEqual(JSON.parse(child.stdout), { reads: 0, handlers: 12 });
 });
 
-test("W1 leaves flag registration hot zones and static public directory untouched", () => {
+test("coach-page registration is PM-anchored and flag-gated; static public dir untouched", () => {
   const root = path.join(__dirname, "..");
   const index = fs.readFileSync(path.join(root, "index.js"), "utf8");
-  assert.equal(index.includes('require("./lib/coach-page")'), false, "editor route registration is PM-MERGE owned");
+  // Post-PM-merge: index.js DOES require the factory, but only inside the
+  // COMPARE_GAP:COACH_PAGE anchors and behind COACH_PAGE_ENABLED. The flag-off
+  // route tests below prove the surface stays inert when the flag is unset.
+  assert.ok(index.includes("COMPARE_GAP:COACH_PAGE:IMPORT:BEGIN"), "import rides the PM anchor");
+  assert.ok(index.includes('const COACH_PAGE_ENABLED = envFlag("COACH_PAGE_ENABLED")'), "flag-gated");
   assert.equal(fs.existsSync(path.join(root, "public", "coach-page.html")), false);
   // views/coach-page.html IS a granted W1 deliverable (contract §3.1) — it is the
   // PM-selected renderer, mounted only when COACH_PAGE_ENABLED. Its mere presence
