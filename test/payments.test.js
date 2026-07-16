@@ -203,20 +203,38 @@ test("POST /stripe/webhook returns 400 when the signature header is missing (sec
   }
 });
 
-test("POST /stripe/webhook returns 200 for an UNHANDLED event type (simulated, no secret)", async () => {
-  delete process.env.STRIPE_WEBHOOK_SECRET; // simulated parse path
+// W2 replaces this dispatch smoke test with real invoice cycle-mint assertions.
+test("POST /stripe/webhook accepts invoice.paid and dispatches to the stub handler", async () => {
+  process.env.STRIPE_WEBHOOK_SECRET = "whsec_testsecret";
+  const handled = [];
+  const handlerErrors = [];
+  const realHandler = global.handleInvoicePaid;
+  const realConsoleError = console.error;
+  global.handleInvoicePaid = async (event) => handled.push(event);
+  console.error = (...args) => {
+    if (String(args[0]).includes("handler for invoice.paid failed")) handlerErrors.push(args);
+    else realConsoleError(...args);
+  };
   const { server, port } = await startServer();
   try {
     const body = JSON.stringify({ type: "invoice.paid", data: { object: { id: "in_1" } } });
+    const sig = stripeSig(body, "whsec_testsecret");
     const res = await request(port, {
       method: "POST",
       path: "/stripe/webhook",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", "stripe-signature": sig },
       body,
     });
-    assert.strictEqual(res.status, 200, "unhandled events are ACK'd, never retry-stormed");
+    assert.strictEqual(res.status, 200, "handled invoice events are ACK'd after dispatch");
     assert.strictEqual(res.json.received, true);
+    assert.strictEqual(handled.length, 1, "invoice.paid dispatches to its stub handler");
+    assert.strictEqual(handled[0].data.object.id, "in_1");
+    assert.strictEqual(handlerErrors.length, 0, "stub dispatch completes without error");
   } finally {
+    delete process.env.STRIPE_WEBHOOK_SECRET;
+    if (realHandler === undefined) delete global.handleInvoicePaid;
+    else global.handleInvoicePaid = realHandler;
+    console.error = realConsoleError;
     server.close();
   }
 });

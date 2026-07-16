@@ -255,6 +255,9 @@
         <div class="types" id="typeList"></div>
       </div>
 
+      <!-- MONEY_ROUND:PROTECTION_MARKUP:BEGIN --><!-- W1 --><!-- MONEY_ROUND:PROTECTION_MARKUP:END -->
+      <!-- MONEY_ROUND:PLAN_MARKUP:BEGIN --><!-- W2 --><!-- MONEY_ROUND:PLAN_MARKUP:END -->
+
       <!-- Your first session -->
       <div class="section">
         <p class="section-k">Your first session</p>
@@ -720,6 +723,13 @@ var QR = (function () {
   var selectedTypeId = null;   // session type the visitor picked (optional)
   var selectedTypeName = "";
   var selectedSlot = null;
+
+  // MONEY_ROUND:PROTECTION_JS:BEGIN
+  // W1
+  // MONEY_ROUND:PROTECTION_JS:END
+  // MONEY_ROUND:PLAN_JS:BEGIN
+  // W2
+  // MONEY_ROUND:PLAN_JS:END
 
   var localTz = "";
   try { localTz = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) {}

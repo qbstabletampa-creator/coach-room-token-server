@@ -450,6 +450,9 @@ function provisionRoutes({ mirrorPrecheck = () => okr([]), mirrorPost = () => ok
   return [
     { test: (u, m) => u.includes("/package_purchases") && u.includes("stripe_session_id=eq.") && m === "GET", reply: () => okr([]) },
     { test: (u, m) => u.includes("/packages") && m === "GET", reply: () => okr([{ id: PKG_ID, coach_id: COACH_ID, credits: 5, expires_days: 30 }]) },
+    // mirrorStripePayment tenant-validation reads for linked rows.
+    { test: (u, m) => u.includes("/athletes") && u.includes(`id=eq.${ATHLETE_ID}`) && u.includes(`coach_id=eq.${COACH_ID}`) && m === "GET", reply: () => okr([{ id: ATHLETE_ID }]) },
+    { test: (u, m) => u.includes("/package_purchases") && u.includes(`id=eq.${PURCHASE_ID}`) && u.includes(`coach_id=eq.${COACH_ID}`) && m === "GET", reply: () => okr([{ id: PURCHASE_ID }]) },
     { test: (u, m) => u.includes("/athletes") && m === "GET", reply: () => okr([]) },
     { test: (u, m) => u.includes("/athletes") && m === "POST", reply: () => okr([{ id: ATHLETE_ID }]) },
     { test: (u, m) => u.includes("/athlete_claims") && m === "GET", reply: () => okr([]) },
@@ -506,6 +509,13 @@ test("webhook mirror tags apple_pay when the session wallet says so", async () =
     assert.strictEqual(res.status, 200);
     const row = mock.calls.find((c) => c.u.includes("/rest/v1/payments") && c.method === "POST").body;
     assert.strictEqual(row.collected_via, "apple_pay", "an apple_pay wallet is tagged as such");
+    assert.strictEqual(row.coach_id, COACH_ID);
+    assert.strictEqual(row.athlete_id, ATHLETE_ID, "mirror links the provisioned athlete");
+    assert.strictEqual(row.amount_cents, 5000, "amount from the session total");
+    assert.strictEqual(row.entry_source, "stripe_webhook");
+    assert.strictEqual(row.stripe_session_id, "cs_test_apple_1", "keyed on the session id for idempotency");
+    assert.strictEqual(row.purchase_id, PURCHASE_ID, "mirror links the package_purchases row");
+    assert.strictEqual(row.status, "recorded");
   } finally {
     delete process.env.STRIPE_WEBHOOK_SECRET;
     mock.restore();

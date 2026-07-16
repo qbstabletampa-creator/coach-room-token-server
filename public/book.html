@@ -291,6 +291,9 @@
         <button id="typeSkip" class="type-skip" type="button">Skip, just show me times</button>
       </div>
 
+      <!-- MONEY_ROUND:PROTECTION_MARKUP:BEGIN --><!-- W1 --><!-- MONEY_ROUND:PROTECTION_MARKUP:END -->
+      <!-- MONEY_ROUND:PLAN_MARKUP:BEGIN --><!-- W2 --><!-- MONEY_ROUND:PLAN_MARKUP:END -->
+
       <div id="timesArea" style="display:none">
         <p id="tzNote" class="tz-note" style="display:none"></p>
 
@@ -452,6 +455,13 @@
   var selectedSlot = null;   // the slot object the confirm sheet is for
   var selectedTypeId = null; // session type picked in the type step (optional)
   var selectedTypeName = "";
+
+  // MONEY_ROUND:PROTECTION_JS:BEGIN
+  // W1
+  // MONEY_ROUND:PROTECTION_JS:END
+  // MONEY_ROUND:PLAN_JS:BEGIN
+  // W2
+  // MONEY_ROUND:PLAN_JS:END
 
   // The browser's own IANA zone: every slot is rendered in THIS zone so the
   // athlete sees their local time no matter where the coach authored it.

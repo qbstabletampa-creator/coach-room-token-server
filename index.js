@@ -22,6 +22,12 @@ const { buildStorefrontHandlers } = require("./lib/storefront");
 const { buildPaymentsHandlers } = require("./lib/payments");
 const { buildDashboardHandlers } = require("./lib/dashboard");
 const { buildImportHandlers } = require("./lib/import");
+// MONEY_ROUND:IMPORT_PROTECTION:BEGIN
+const { buildProtectionHandlers } = require("./lib/protection");
+// MONEY_ROUND:IMPORT_PROTECTION:END
+// MONEY_ROUND:IMPORT_BILLING:BEGIN
+const { buildBillingHandlers } = require("./lib/billing");
+// MONEY_ROUND:IMPORT_BILLING:END
 const { buildAccountDeleteHandler } = require("./lib/account-delete");
 
 const PORT = process.env.PORT || 3130;
@@ -92,6 +98,12 @@ const PAYMENTS_ENABLED = envFlag("PAYMENTS_ENABLED");
 // flag) — they serve a public document with no tenant data.
 const DASHBOARD_ENABLED = envFlag("DASHBOARD_ENABLED");
 const IMPORT_ENABLED = envFlag("IMPORT_ENABLED");
+// MONEY_ROUND:FLAG_PROTECTION:BEGIN
+const PROTECTION_ENABLED = envFlag("PROTECTION_ENABLED");
+// MONEY_ROUND:FLAG_PROTECTION:END
+// MONEY_ROUND:FLAG_BILLING:BEGIN
+const BILLING_ENABLED = envFlag("BILLING_ENABLED");
+// MONEY_ROUND:FLAG_BILLING:END
 
 if (!LIVEKIT_API_KEY || !LIVEKIT_API_SECRET || !LIVEKIT_URL) {
   console.error(
@@ -1671,6 +1683,38 @@ if (PAYMENTS_ENABLED) {
   app.patch("/payments/rails", paymentsWriteLimiter, payments.patchRails);
 }
 
+// MONEY_ROUND:ROUTES_PROTECTION:BEGIN
+if (PROTECTION_ENABLED) {
+  const protectionReadLimiter = rateLimit({
+    windowMs: 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false,
+    message: { error: "too_many_requests" },
+  });
+  const protectionWriteLimiter = rateLimit({
+    windowMs: 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false,
+    message: { error: "too_many_requests" },
+  });
+  const protection = buildProtectionHandlers({ requireSupabaseUser, notify });
+  app.get("/protection/invite/:inviteToken", protectionReadLimiter, protection.getInvitePolicy);
+  app.get("/protection/:slug", protectionReadLimiter, protection.getSlugPolicy);
+  app.post("/protection/:slug/setup-intent", protectionWriteLimiter, protection.postSetupIntent);
+  app.post("/coach/bookings/no-show", protectionWriteLimiter, protection.postNoShow);
+  app.post("/coach/charges/:id/waive", protectionWriteLimiter, protection.postWaive);
+}
+// MONEY_ROUND:ROUTES_PROTECTION:END
+// MONEY_ROUND:ROUTES_BILLING:BEGIN
+if (BILLING_ENABLED) {
+  const billingLimiter = rateLimit({
+    windowMs: 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false,
+    message: { error: "too_many_requests" },
+  });
+  const billing = buildBillingHandlers({ requireSupabaseUser, notify });
+  app.get("/coach/subscriptions", billingLimiter, billing.getSubscriptions);
+  app.post("/coach/subscriptions/pause", billingLimiter, billing.postPause);
+  app.post("/coach/subscriptions/resume", billingLimiter, billing.postResume);
+  app.post("/coach/subscriptions/cancel", billingLimiter, billing.postCancel);
+}
+// MONEY_ROUND:ROUTES_BILLING:END
+
 // ---- Round-2 coach dashboard (additive, env-flag guarded OFF by default) -----
 // GET /coach/dashboard — the revenue/bookings/open-slots/needs-attention rollup.
 // Coach-authed (Supabase JWT, coachId from the verified token). Read-rate limited.
@@ -1735,6 +1779,12 @@ module.exports = {
   buildStorefrontHandlers,
   // Payments Phase 1 (additive). Exported for unit tests + future callers.
   buildPaymentsHandlers,
+  // MONEY_ROUND:EXPORT_PROTECTION:BEGIN
+  buildProtectionHandlers,
+  // MONEY_ROUND:EXPORT_PROTECTION:END
+  // MONEY_ROUND:EXPORT_BILLING:BEGIN
+  buildBillingHandlers,
+  // MONEY_ROUND:EXPORT_BILLING:END
   // Round-2 dashboard + import (additive, foundation stubs). Exported for unit
   // tests + the feature builders that fill the internals.
   buildDashboardHandlers,
