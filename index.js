@@ -32,6 +32,9 @@ const {
 // MONEY_ROUND:IMPORT_BILLING:BEGIN
 const { buildBillingHandlers } = require("./lib/billing");
 // MONEY_ROUND:IMPORT_BILLING:END
+// COMPARE_GAP:REVIEWS:IMPORT:BEGIN
+const { buildVideoReviewHandlers } = require("./lib/video-review");
+// COMPARE_GAP:REVIEWS:IMPORT:END
 const { buildAccountDeleteHandler } = require("./lib/account-delete");
 // Open API + MCP layer (build brief: feat/open-api-mcp). Additive; every route
 // below is gated by API_ENABLED (default OFF), so requiring these here is inert
@@ -124,6 +127,9 @@ const PROTECTION_ENABLED = envFlag("PROTECTION_ENABLED");
 // MONEY_ROUND:FLAG_BILLING:BEGIN
 const BILLING_ENABLED = envFlag("BILLING_ENABLED");
 // MONEY_ROUND:FLAG_BILLING:END
+// COMPARE_GAP:REVIEWS:FLAG:BEGIN
+const REVIEWS_ENABLED = envFlag("REVIEWS_ENABLED");
+// COMPARE_GAP:REVIEWS:FLAG:END
 // API_ENABLED gates the entire open API + MCP surface: the /api/v1 REST cluster
 // and the /mcp MCP endpoint (plus the /mcp body carve-out below). OFF by default
 // so the whole layer ships dark — completely inert in production until CJ flips
@@ -274,6 +280,11 @@ if (API_ENABLED) {
   app.use("/api/v1/athletes/import", express.json({ limit: "1mb" }));
 }
 
+// COMPARE_GAP:REVIEWS:BODY:BEGIN
+if (REVIEWS_ENABLED) {
+  app.use("/reviews", express.json({ limit: "1mb" }));
+}
+// COMPARE_GAP:REVIEWS:BODY:END
 app.use(express.json());
 
 // ---- Analyze v1: same-origin CORS proxy --------------------------------------
@@ -1792,6 +1803,39 @@ if (BILLING_ENABLED) {
   app.post("/coach/subscriptions/cancel", billingLimiter, billing.postCancel);
 }
 // MONEY_ROUND:ROUTES_BILLING:END
+// COMPARE_GAP:REVIEWS:ROUTES:BEGIN
+if (REVIEWS_ENABLED) {
+  const reviewsReadLimiter = rateLimit({
+    windowMs: 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false,
+    message: { error: "too_many_requests" },
+  });
+  const reviewsWriteLimiter = rateLimit({
+    windowMs: 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false,
+    message: { error: "too_many_requests" },
+  });
+  const reviewsAudioLimiter = rateLimit({
+    windowMs: 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false,
+    message: { error: "too_many_requests" },
+  });
+  const reviews = buildVideoReviewHandlers({
+    requireSupabaseUser,
+    notify,
+    signClipUrl,
+  });
+  app.post("/reviews", reviewsWriteLimiter, reviews.postReview);
+  app.get("/reviews", reviewsReadLimiter, reviews.getReviews);
+  app.get("/reviews/:id", reviewsReadLimiter, reviews.getReview);
+  app.post(
+    "/reviews/:id/audio",
+    reviewsAudioLimiter,
+    express.raw({ type: ["audio/*", "application/octet-stream"], limit: "25mb" }),
+    reviews.postAudio,
+  );
+  app.post("/reviews/:id/answer", reviewsWriteLimiter, reviews.postAnswer);
+  app.get("/reviews/:id/annotation", reviewsReadLimiter, reviews.getAnnotation);
+  app.post("/reviews/:id/decline", reviewsWriteLimiter, reviews.postDecline);
+}
+// COMPARE_GAP:REVIEWS:ROUTES:END
 
 // ---- Round-2 bulk athlete import (additive, env-flag guarded OFF by default) --
 // POST /coach/athletes/import — paste a roster, one tap imports everyone + returns
@@ -2031,6 +2075,9 @@ module.exports = {
   // MONEY_ROUND:EXPORT_BILLING:BEGIN
   buildBillingHandlers,
   // MONEY_ROUND:EXPORT_BILLING:END
+  // COMPARE_GAP:REVIEWS:EXPORT:BEGIN
+  buildVideoReviewHandlers,
+  // COMPARE_GAP:REVIEWS:EXPORT:END
   // Round-2 dashboard + import (additive, foundation stubs). Exported for unit
   // tests + the feature builders that fill the internals.
   buildDashboardHandlers,
