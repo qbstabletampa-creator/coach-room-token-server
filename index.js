@@ -58,6 +58,19 @@ const {
   readPublicCoachPage,
 } = require("./lib/coach-page");
 // COMPARE_GAP:COACH_PAGE:IMPORT:END
+// COMPARE_GAP:WAITLIST:IMPORT:BEGIN
+const {
+  buildWaitlistHandlers,
+  decorateWaitlistBookPage,
+} = require("./lib/waitlist");
+// COMPARE_GAP:WAITLIST:IMPORT:END
+// COMPARE_GAP:FORMS:IMPORT:BEGIN
+const {
+  buildFormsHandlers,
+  decorateFormsBookPage,
+  formsClaimGateFragment,
+} = require("./lib/forms");
+// COMPARE_GAP:FORMS:IMPORT:END
 const { buildAccountDeleteHandler } = require("./lib/account-delete");
 // Open API + MCP layer (build brief: feat/open-api-mcp). Additive; every route
 // below is gated by API_ENABLED (default OFF), so requiring these here is inert
@@ -165,6 +178,12 @@ const REMINDERS_EDITOR_ENABLED = envFlag("REMINDERS_EDITOR_ENABLED");
 // COMPARE_GAP:COACH_PAGE:FLAG:BEGIN
 const COACH_PAGE_ENABLED = envFlag("COACH_PAGE_ENABLED");
 // COMPARE_GAP:COACH_PAGE:FLAG:END
+// COMPARE_GAP:WAITLIST:FLAG:BEGIN
+const WAITLIST_ENABLED = envFlag("WAITLIST_ENABLED");
+// COMPARE_GAP:WAITLIST:FLAG:END
+// COMPARE_GAP:FORMS:FLAG:BEGIN
+const FORMS_ENABLED = envFlag("FORMS_ENABLED");
+// COMPARE_GAP:FORMS:FLAG:END
 // API_ENABLED gates the entire open API + MCP surface: the /api/v1 REST cluster
 // and the /mcp MCP endpoint (plus the /mcp body carve-out below). OFF by default
 // so the whole layer ships dark — completely inert in production until CJ flips
@@ -811,14 +830,32 @@ app.get("/web/:id", (req, res) => {
 // so GET /book/:token falls through to a 404. book.html loads its data from the
 // server cluster's GET /schedule/:inviteToken (behind the same flag).
 if (SCHEDULING_ENABLED) {
-  app.get("/book/:inviteToken", (req, res) => {
+  app.get("/book/:inviteToken", async (req, res) => {
     const token = req.params.inviteToken || "";
     // Booking invites are UUID tokens (booking_invites.token). Reject anything
     // else with the same friendly page /web uses for a bad room link.
     if (!UUID_RE.test(token)) {
       return res.status(400).type("html").send(invalidRoomPage());
     }
-    res.sendFile(path.join(__dirname, "public", "book.html"));
+    // COMPARE_GAP:WAITLIST:BOOK_PAGE:BEGIN
+    // COMPARE_GAP:FORMS:BOOK_PAGE:BEGIN
+    if (!WAITLIST_ENABLED && !FORMS_ENABLED) {
+      return res.sendFile(path.join(__dirname, "public", "book.html"));
+    }
+    try {
+      let html = await require("node:fs/promises").readFile(
+        path.join(__dirname, "public", "book.html"),
+        "utf8",
+      );
+      if (WAITLIST_ENABLED) html = decorateWaitlistBookPage(html);
+      if (FORMS_ENABLED) html = decorateFormsBookPage(html);
+      return res.type("html").send(html);
+    } catch (err) {
+      console.error("[public-flow] book page decoration failed:", err);
+      return res.status(500).type("html").send(invalidRoomPage());
+    }
+    // COMPARE_GAP:FORMS:BOOK_PAGE:END
+    // COMPARE_GAP:WAITLIST:BOOK_PAGE:END
   });
 }
 
@@ -1132,6 +1169,9 @@ app.get("/claim/:token", claimGetLimiter, async (req, res) => {
     claim && !claim.claimed_at && new Date(claim.expires_at).getTime() > Date.now();
   const athleteName = escapeHtml(claim?.athletes?.name ?? "Athlete");
   const coachName = escapeHtml(claim?.coaches?.full_name ?? "Your coach");
+  // COMPARE_GAP:FORMS:CLAIM_PAGE:BEGIN
+  const formsClaimGate = FORMS_ENABLED ? formsClaimGateFragment() : "";
+  // COMPARE_GAP:FORMS:CLAIM_PAGE:END
 
   res.type("html").send(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8" />
@@ -1157,7 +1197,7 @@ app.get("/claim/:token", claimGetLimiter, async (req, res) => {
       ? `<h1>${athleteName}, you're in.</h1>
          <p><span class="gold">${coachName}</span> set up your spot — your film, your punch lists, and your live sessions in one place. No sign-up, just claim it.</p>
          <a class="cta" href="coachroomapp://claim/${escapeHtml(token)}">Claim my spot</a>
-         <p style="margin-top:18px;font-size:12.5px">Claiming finishes inside the CoachTime app. Browser claiming is coming next.</p>`
+         <p style="margin-top:18px;font-size:12.5px">Claiming finishes inside the CoachTime app. Browser claiming is coming next.</p>${formsClaimGate}`
       : `<h1>This invite has expired.</h1>
          <p>Ask your coach to send a fresh link — it takes them one tap.</p>`
   }
@@ -1899,6 +1939,75 @@ if (ACCOUNTABILITY_ENABLED) {
   app.get("/hw/:completeToken", homeworkPublicReadLimiter, homework.getPublicPage);
 }
 // COMPARE_GAP:HOMEWORK:ROUTES:END
+// COMPARE_GAP:WAITLIST:ROUTES:BEGIN
+if (SCHEDULING_ENABLED && WAITLIST_ENABLED) {
+  const waitlistPublicReadLimiter = rateLimit({
+    windowMs: 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false,
+    message: { error: "too_many_requests" },
+  });
+  const waitlistPublicWriteLimiter = rateLimit({
+    windowMs: 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false,
+    message: { error: "too_many_requests" },
+  });
+  const waitlistCoachReadLimiter = rateLimit({
+    windowMs: 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false,
+    message: { error: "too_many_requests" },
+  });
+  const waitlistCoachWriteLimiter = rateLimit({
+    windowMs: 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false,
+    message: { error: "too_many_requests" },
+  });
+  const waitlist = buildWaitlistHandlers({
+    requireSupabaseUser,
+    notify,
+    protectionEnabled: () => PROTECTION_ENABLED,
+  });
+  app.get("/schedule/:inviteToken/waitlist", waitlistPublicReadLimiter, waitlist.getPublicWaitlist);
+  app.post("/schedule/:inviteToken/waitlist", waitlistPublicWriteLimiter, waitlist.postPublicJoin);
+  app.post("/schedule/:inviteToken/waitlist/leave", waitlistPublicWriteLimiter, waitlist.postPublicLeave);
+  app.post("/schedule/:inviteToken/waitlist/converted", waitlistPublicWriteLimiter, waitlist.postPublicConverted);
+  app.get("/coach/settings/waitlist/entries", waitlistCoachReadLimiter, waitlist.getCoachWaitlist);
+  app.post("/coach/settings/waitlist/entries", waitlistCoachWriteLimiter, waitlist.postCoachWaitlist);
+  app.delete("/coach/settings/waitlist/entries/:id", waitlistCoachWriteLimiter, waitlist.deleteCoachWaitlist);
+  app.post("/coach/settings/waitlist/entries/:id/offer", waitlistCoachWriteLimiter, waitlist.postCoachOffer);
+  app.get("/coach/settings/waitlist", waitlistCoachReadLimiter, waitlist.getWaitlistSettings);
+  app.patch("/coach/settings/waitlist", waitlistCoachWriteLimiter, waitlist.patchWaitlistSettings);
+}
+// COMPARE_GAP:WAITLIST:ROUTES:END
+// COMPARE_GAP:FORMS:ROUTES:BEGIN
+if (FORMS_ENABLED) {
+  const formsPublicReadLimiter = rateLimit({
+    windowMs: 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false,
+    message: { error: "too_many_requests" },
+  });
+  const formsPublicSignLimiter = rateLimit({
+    windowMs: 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false,
+    message: { error: "too_many_requests" },
+  });
+  const formsCoachReadLimiter = rateLimit({
+    windowMs: 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false,
+    message: { error: "too_many_requests" },
+  });
+  const formsCoachWriteLimiter = rateLimit({
+    windowMs: 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false,
+    message: { error: "too_many_requests" },
+  });
+  const forms = buildFormsHandlers({ requireSupabaseUser, notify });
+  app.get("/forms/invite/:token", formsPublicReadLimiter, forms.getInviteForms);
+  app.post("/forms/invite/:token/sign", formsPublicSignLimiter, forms.postInviteSign);
+  app.get("/forms/claim/:token", formsPublicReadLimiter, forms.getClaimForms);
+  app.post("/forms/claim/:token/sign", formsPublicSignLimiter, forms.postClaimSign);
+  app.get("/sign/invite/:token", formsPublicReadLimiter, forms.getInviteSignPage);
+  app.get("/sign/claim/:token", formsPublicReadLimiter, forms.getClaimSignPage);
+  app.get("/coach/settings/forms", formsCoachReadLimiter, forms.getCoachForms);
+  app.post("/coach/settings/forms", formsCoachWriteLimiter, forms.postCoachForm);
+  app.put("/coach/settings/forms/default", formsCoachWriteLimiter, forms.putDefaultForm);
+  app.patch("/coach/settings/forms/:id", formsCoachWriteLimiter, forms.patchCoachForm);
+  app.delete("/coach/settings/forms/:id", formsCoachWriteLimiter, forms.deleteCoachForm);
+  app.get("/coach/settings/forms/:id/responses", formsCoachReadLimiter, forms.getFormResponses);
+  app.get("/coach/athletes/:id/forms", formsCoachReadLimiter, forms.getAthleteForms);
+}
+// COMPARE_GAP:FORMS:ROUTES:END
 // COMPARE_GAP:CALENDAR:ROUTES:BEGIN
 if (SCHEDULING_ENABLED && CALENDAR_SYNC_ENABLED) {
   const calendarReadLimiter = rateLimit({
@@ -2242,6 +2351,12 @@ module.exports = {
   // COMPARE_GAP:HOMEWORK:EXPORT:BEGIN
   buildAccountabilityHandlers,
   // COMPARE_GAP:HOMEWORK:EXPORT:END
+  // COMPARE_GAP:WAITLIST:EXPORT:BEGIN
+  buildWaitlistHandlers,
+  // COMPARE_GAP:WAITLIST:EXPORT:END
+  // COMPARE_GAP:FORMS:EXPORT:BEGIN
+  buildFormsHandlers,
+  // COMPARE_GAP:FORMS:EXPORT:END
   // COMPARE_GAP:CALENDAR:EXPORT:BEGIN
   buildCalendarHandlers,
   mirrorCalendarBooking,
