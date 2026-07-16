@@ -1555,25 +1555,46 @@ if (STRIPE_WEBHOOK_ENABLED) {
 }
 
 // Look up a package (session pack) row by id via Supabase REST. Returns the row
-// ({ id, name, price_cents, active }) or null. Service key, server-side only —
+// (including its billing shape) or null. Service key, server-side only —
 // this is the authority for the checkout amount, never the client.
-async function getPackage(packageId) {
+async function getPackage(packageId, userId) {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return null;
-  const q =
-    `${SUPABASE_URL}/rest/v1/packages` +
-    `?id=eq.${encodeURIComponent(packageId)}` +
-    `&select=id,name,price_cents,active&limit=1`;
-  const resp = await fetch(q, {
-    headers: { apikey: SUPABASE_SERVICE_KEY, authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
-  });
-  if (!resp.ok) {
-    if (resp.status !== 404) {
-      console.error("[checkout] package lookup non-ok:", resp.status);
+  const headers = {
+    apikey: SUPABASE_SERVICE_KEY,
+    authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+  };
+  const athleteResp = await fetch(
+    `${SUPABASE_URL}/rest/v1/athletes?user_id=eq.${encodeURIComponent(userId)}` +
+      `&select=coach_id`,
+    { headers },
+  );
+  if (!athleteResp.ok) {
+    if (athleteResp.status !== 404) {
+      console.error("[checkout] athlete tenant lookup non-ok:", athleteResp.status);
     }
     return null;
   }
-  const rows = await resp.json().catch(() => []);
-  return Array.isArray(rows) && rows[0] ? rows[0] : null;
+  const athleteRows = await athleteResp.json().catch(() => []);
+  const coachIds = [...new Set(
+    (Array.isArray(athleteRows) ? athleteRows : []).map((row) => row.coach_id).filter(Boolean),
+  )];
+  for (const coachId of coachIds) {
+    const q =
+      `${SUPABASE_URL}/rest/v1/packages` +
+      `?id=eq.${encodeURIComponent(packageId)}` +
+      `&coach_id=eq.${encodeURIComponent(coachId)}` +
+      `&select=id,coach_id,name,price_cents,credits,active,billing_type,billing_interval,installment_count,auto_renew,max_cycles,carry_forward,trial_days,grace_days&limit=1`;
+    const resp = await fetch(q, { headers });
+    if (!resp.ok) {
+      if (resp.status !== 404) {
+        console.error("[checkout] package lookup non-ok:", resp.status);
+      }
+      continue;
+    }
+    const rows = await resp.json().catch(() => []);
+    if (Array.isArray(rows) && rows[0]) return rows[0];
+  }
+  return null;
 }
 
 // POST /checkout/create-session — simulated-mode-first checkout. Identity from
@@ -1590,6 +1611,7 @@ if (CHECKOUT_ENABLED) {
   const createSession = createSessionHandler({
     requireSupabaseUser,
     getPackage,
+    billingEnabled: BILLING_ENABLED,
   });
   app.post("/checkout/create-session", checkoutLimiter, createSession);
 }

@@ -299,11 +299,15 @@ test("POST /checkout/create-session simulated mode returns a stable shape (amoun
     if (u.includes("/auth/v1/user")) {
       return { ok: true, json: async () => ({ id: "user-1" }) };
     }
+    if (u.includes("/rest/v1/athletes")) {
+      return { ok: true, json: async () => [{ coach_id: "coach-1" }] };
+    }
     if (u.includes("/rest/v1/packages")) {
       return {
         ok: true,
         json: async () => [
-          { id: "p1", name: "5-Session Pack", price_cents: 5000, active: true },
+          { id: "p1", coach_id: "coach-1", name: "5-Session Pack", price_cents: 5000,
+            active: true },
         ],
       };
     }
@@ -320,7 +324,7 @@ test("POST /checkout/create-session simulated mode returns a stable shape (amoun
     assert.strictEqual(res.json.simulated, true);
     assert.strictEqual(res.json.amountCents, 5000, "amount is the server-computed package price");
     assert.strictEqual(res.json.packageId, "p1");
-    assert.strictEqual(res.json.clientSecret, "cs_simulated_p1_secret");
+    assert.strictEqual(res.json.clientSecret, null);
     assert.ok(typeof res.json.url === "string" && res.json.url.length > 0, "a checkout url is returned");
   } finally {
     global.fetch = realFetch;

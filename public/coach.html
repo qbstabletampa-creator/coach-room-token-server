@@ -256,7 +256,12 @@
       </div>
 
       <!-- MONEY_ROUND:PROTECTION_MARKUP:BEGIN --><!-- W1 --><!-- MONEY_ROUND:PROTECTION_MARKUP:END -->
-      <!-- MONEY_ROUND:PLAN_MARKUP:BEGIN --><!-- W2 --><!-- MONEY_ROUND:PLAN_MARKUP:END -->
+      <!-- MONEY_ROUND:PLAN_MARKUP:BEGIN -->
+      <div class="section" id="planSection" style="display:none">
+        <p class="section-k">Session plans</p>
+        <div class="types" id="planList"></div>
+      </div>
+      <!-- MONEY_ROUND:PLAN_MARKUP:END -->
 
       <!-- Your first session -->
       <div class="section">
@@ -728,7 +733,35 @@ var QR = (function () {
   // W1
   // MONEY_ROUND:PROTECTION_JS:END
   // MONEY_ROUND:PLAN_JS:BEGIN
-  // W2
+  var planSection = document.getElementById("planSection");
+  var planList = document.getElementById("planList");
+  function planCopy(p) {
+    var credits = isNum(p.credits) ? Math.max(0, Math.floor(p.credits)) : 0;
+    if (p.billing_type === "subscription") {
+      return money(p.price_cents) + " / " + (asStr(p.billing_interval) || "month") +
+        " · " + credits + " sessions each cycle";
+    }
+    if (p.billing_type === "installment") {
+      var count = isNum(p.installment_count) ? Math.floor(p.installment_count) : 0;
+      return count + " payments of " + money(Math.round(Number(p.price_cents) / count)) +
+        " · credits up front";
+    }
+    return money(p.price_cents) + " · " + credits + " sessions";
+  }
+  function renderPlans(plans) {
+    planList.textContent = "";
+    (Array.isArray(plans) ? plans : []).forEach(function (p) {
+      if (!p || !isNum(p.price_cents)) return;
+      var card = document.createElement("div"); card.className = "type-card";
+      var top = document.createElement("div"); top.className = "type-top";
+      var name = document.createElement("span"); name.className = "type-name";
+      name.textContent = asStr(p.name) || "Session plan";
+      top.appendChild(name); card.appendChild(top);
+      var detail = document.createElement("div"); detail.className = "type-sub";
+      detail.textContent = planCopy(p); card.appendChild(detail); planList.appendChild(card);
+    });
+    if (planList.childNodes.length) show(planSection); else hide(planSection);
+  }
   // MONEY_ROUND:PLAN_JS:END
 
   var localTz = "";
@@ -980,6 +1013,7 @@ var QR = (function () {
       if (asStr(c.bio)) { coachBioEl.textContent = asStr(c.bio); show(coachBioEl); } else { hide(coachBioEl); }
 
       renderTypes(Array.isArray(data.session_types) ? data.session_types : []);
+      renderPlans(Array.isArray(data.packages) ? data.packages : []);
       syncTypeSelection();
       renderSlots(Array.isArray(data.open_slots) ? data.open_slots : []);
 
