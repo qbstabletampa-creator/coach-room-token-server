@@ -539,3 +539,37 @@ test("freeze subscription_not_found logs loudly and webhook ACKs 200", async () 
     db.restore();
   }
 });
+
+test("basil-shaped invoice (parent.subscription_details, no .subscription) still mints", async () => {
+  // Live-proof regression 2026-07-16: real Stripe (basil API) omits
+  // invoice.subscription and nests the id under parent.subscription_details.
+  const state = { enrollment: baseEnrollment(), credits: 12 };
+  const db = installDb(state);
+  try {
+    const basilInvoice = {
+      id: "in_basil",
+      amount_paid: 2000,
+      currency: "usd",
+      created: 1785542400,
+      parent: { type: "subscription_details", subscription_details: { subscription: "sub_basil" } },
+    };
+    let retrieved = null;
+    await handleInvoicePaid({ data: { object: basilInvoice } }, {
+      supabase: s,
+      stripe: {
+        subscriptions: {
+          retrieve: async (id) => { retrieved = id; return subscription(); },
+          update: async () => {},
+        },
+      },
+      mirrorStripePayment: async () => {},
+      notify: async () => {},
+    });
+    assert.equal(retrieved, "sub_basil");
+    const minted = rpcBodies(db, "mint_billing_cycle");
+    assert.equal(minted.length, 1);
+    assert.equal(minted[0].p_stripe_invoice_id, "in_basil");
+  } finally {
+    db.restore();
+  }
+});
