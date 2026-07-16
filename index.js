@@ -35,6 +35,9 @@ const { buildBillingHandlers } = require("./lib/billing");
 // COMPARE_GAP:REVIEWS:IMPORT:BEGIN
 const { buildVideoReviewHandlers } = require("./lib/video-review");
 // COMPARE_GAP:REVIEWS:IMPORT:END
+// COMPARE_GAP:HOMEWORK:IMPORT:BEGIN
+const { buildAccountabilityHandlers } = require("./lib/accountability");
+// COMPARE_GAP:HOMEWORK:IMPORT:END
 const { buildAccountDeleteHandler } = require("./lib/account-delete");
 // Open API + MCP layer (build brief: feat/open-api-mcp). Additive; every route
 // below is gated by API_ENABLED (default OFF), so requiring these here is inert
@@ -130,6 +133,9 @@ const BILLING_ENABLED = envFlag("BILLING_ENABLED");
 // COMPARE_GAP:REVIEWS:FLAG:BEGIN
 const REVIEWS_ENABLED = envFlag("REVIEWS_ENABLED");
 // COMPARE_GAP:REVIEWS:FLAG:END
+// COMPARE_GAP:HOMEWORK:FLAG:BEGIN
+const ACCOUNTABILITY_ENABLED = envFlag("ACCOUNTABILITY_ENABLED");
+// COMPARE_GAP:HOMEWORK:FLAG:END
 // API_ENABLED gates the entire open API + MCP surface: the /api/v1 REST cluster
 // and the /mcp MCP endpoint (plus the /mcp body carve-out below). OFF by default
 // so the whole layer ships dark — completely inert in production until CJ flips
@@ -1836,6 +1842,33 @@ if (REVIEWS_ENABLED) {
   app.post("/reviews/:id/decline", reviewsWriteLimiter, reviews.postDecline);
 }
 // COMPARE_GAP:REVIEWS:ROUTES:END
+// COMPARE_GAP:HOMEWORK:ROUTES:BEGIN
+if (ACCOUNTABILITY_ENABLED) {
+  const homeworkReadLimiter = rateLimit({
+    windowMs: 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false,
+    message: { error: "too_many_requests" },
+  });
+  const homeworkWriteLimiter = rateLimit({
+    windowMs: 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false,
+    message: { error: "too_many_requests" },
+  });
+  const homeworkPublicReadLimiter = rateLimit({
+    windowMs: 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false,
+    message: { error: "too_many_requests" },
+  });
+  const homeworkPublicCompleteLimiter = rateLimit({
+    windowMs: 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false,
+    message: { error: "too_many_requests" },
+  });
+  const homework = buildAccountabilityHandlers({ requireSupabaseUser, notify });
+  app.post("/homework", homeworkWriteLimiter, homework.postHomework);
+  app.get("/homework", homeworkReadLimiter, homework.getHomework);
+  app.post("/homework/:id/done", homeworkWriteLimiter, homework.postHomeworkDone);
+  app.get("/hw/:completeToken/data", homeworkPublicReadLimiter, homework.getPublicHomework);
+  app.post("/hw/:completeToken/done", homeworkPublicCompleteLimiter, homework.postPublicDone);
+  app.get("/hw/:completeToken", homeworkPublicReadLimiter, homework.getPublicPage);
+}
+// COMPARE_GAP:HOMEWORK:ROUTES:END
 
 // ---- Round-2 bulk athlete import (additive, env-flag guarded OFF by default) --
 // POST /coach/athletes/import — paste a roster, one tap imports everyone + returns
@@ -2078,6 +2111,9 @@ module.exports = {
   // COMPARE_GAP:REVIEWS:EXPORT:BEGIN
   buildVideoReviewHandlers,
   // COMPARE_GAP:REVIEWS:EXPORT:END
+  // COMPARE_GAP:HOMEWORK:EXPORT:BEGIN
+  buildAccountabilityHandlers,
+  // COMPARE_GAP:HOMEWORK:EXPORT:END
   // Round-2 dashboard + import (additive, foundation stubs). Exported for unit
   // tests + the feature builders that fill the internals.
   buildDashboardHandlers,
