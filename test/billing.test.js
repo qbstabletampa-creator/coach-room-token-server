@@ -239,3 +239,57 @@ test("pause/resume/cancel use exact Stripe params; a foreign id is locked before
     assert.equal(stripeCalls.length, 4, "cross-tenant/unknown ownership fails before Stripe");
   } finally { global.fetch = realFetch; }
 });
+
+test("shared subscription action maps Stripe failures to the safe existing response", async () => {
+  const realFetch = global.fetch;
+  global.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes("billing_subscriptions")) return ok([enrollment()]);
+    throw new Error(`unexpected GET ${u}`);
+  };
+  try {
+    const handlers = buildBillingHandlers({
+      requireSupabaseUser: async () => ({ user: { id: COACH, app_metadata: { role: "coach" } } }),
+      getStripeClient: () => ({ subscriptions: {
+        update: async () => { throw new Error("sk_live_secret provider detail"); },
+      } }),
+    });
+    const res = response();
+    await handlers.postPause({ body: { subscription_id: ENROLLMENT } }, res);
+    assert.deepEqual([res.statusCode, res.body], [502, { error: "payment_provider_error" }]);
+    assert.ok(!JSON.stringify(res.body).includes("sk_live_secret"));
+  } finally { global.fetch = realFetch; }
+});
+
+test("subscription HTTP actions validate id and when before configuration or ownership", async () => {
+  const realFetch = global.fetch;
+  const realUrl = process.env.SUPABASE_URL;
+  const realKey = process.env.SUPABASE_SERVICE_KEY;
+  const handlers = buildBillingHandlers({
+    requireSupabaseUser: async () => ({ user: { id: COACH, app_metadata: { role: "coach" } } }),
+    getStripeClient: () => { throw new Error("Stripe must not be reached"); },
+  });
+  try {
+    global.fetch = async () => { throw new Error("ownership must not be reached"); };
+    let res = response();
+    await handlers.postCancel({ body: { subscription_id: ENROLLMENT, when: "later" } }, res);
+    assert.deepEqual([res.statusCode, res.body], [400, { error: "invalid_when" }]);
+
+    delete process.env.SUPABASE_URL;
+    delete process.env.SUPABASE_SERVICE_KEY;
+    for (const body of [
+      { subscription_id: "malformed" },
+      { subscription_id: ENROLLMENT, when: "later" },
+    ]) {
+      res = response();
+      await handlers.postCancel({ body }, res);
+      assert.deepEqual([res.statusCode, res.body], [400, {
+        error: body.when ? "invalid_when" : "invalid_subscription_id",
+      }]);
+    }
+  } finally {
+    global.fetch = realFetch;
+    process.env.SUPABASE_URL = realUrl;
+    process.env.SUPABASE_SERVICE_KEY = realKey;
+  }
+});
