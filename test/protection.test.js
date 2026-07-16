@@ -56,8 +56,89 @@ function handler(overrides = {}) {
     mirrorStripePayment: overrides.mirrorStripePayment || (async () => ({ inserted: true })),
     getStripeSecretKey: overrides.getStripeSecretKey || (() => undefined),
     createStripe: overrides.createStripe,
+    waitlistFill: overrides.waitlistFill,
   });
 }
+
+test("real booking gate uses the slot type and returns setup_url for a substituted client type", async () => {
+  const CLIENT_TYPE = OTHER;
+  const mock = mockFetch(({ url }) => {
+    if (url.includes("bookable_slots")) return response([{ id: SLOT, session_type_id: TYPE }]);
+    if (url.includes("session_types") && url.includes(`id=eq.${TYPE}`)) return response([{ id: TYPE, price_cents: 6000 }]);
+    if (url.includes("session_types") && url.includes(`id=eq.${CLIENT_TYPE}`)) return response([{ id: CLIENT_TYPE, price_cents: 0 }]);
+    if (url.includes("protection_policies") && url.includes(`session_type_id=eq.${TYPE}`)) {
+      return response([policyRow({ session_type_id: TYPE, require_card: true })]);
+    }
+    if (url.includes("protection_policies")) return response([policyRow({ enabled: false })]);
+    if (url.includes("athlete_payment_methods")) return response([]);
+    if (url.includes("stripe_customers")) return response([{ stripe_customer_id: "cus_existing" }]);
+    return response([]);
+  });
+  try {
+    handler(); // reset the protection runtime to simulated Stripe mode
+    const result = await protection.assessBookingGate({
+      coachId: COACH,
+      athleteId: ATHLETE,
+      slotId: SLOT,
+      sessionTypeId: CLIENT_TYPE,
+      setupContext: { email: "p@example.com", returnPath: `/book/${INVITE}` },
+    });
+    assert.strictEqual(result.allowed, false);
+    assert.strictEqual(result.status, "requires_card");
+    assert.strictEqual(result.sessionTypeId, TYPE);
+    assert.match(result.setup_url, /^https:\/\/checkout\.stripe\.com\//);
+    assert.deepStrictEqual(Object.keys(result), ["allowed", "status", "sessionTypeId", "setup_url"]);
+    assert.ok(!mock.calls.some((c) => c.url.includes("protection_policies") && c.url.includes(`session_type_id=eq.${CLIENT_TYPE}`)));
+  } finally { mock.restore(); }
+});
+
+test("required-card setup mint failure blocks with a retryable unavailable result", async () => {
+  const mock = mockFetch(({ url }) => {
+    if (url.includes("bookable_slots")) return response([{ id: SLOT, session_type_id: TYPE }]);
+    if (url.includes("session_types")) return response([{ id: TYPE, price_cents: 6000 }]);
+    if (url.includes("protection_policies")) return response([policyRow({ session_type_id: TYPE })]);
+    if (url.includes("athlete_payment_methods")) return response([]);
+    if (url.includes("stripe_customers")) return response([{ stripe_customer_id: "cus_existing" }]);
+    return response([]);
+  });
+  try {
+    handler({
+      getStripeSecretKey: () => "sk_test_failure",
+      createStripe: () => ({
+        checkout: { sessions: { create: async () => { throw new Error("stripe timeout"); } } },
+      }),
+    });
+    const result = await protection.assessBookingGate({
+      coachId: COACH,
+      athleteId: ATHLETE,
+      slotId: SLOT,
+      setupContext: { email: "p@example.com", returnPath: `/book/${INVITE}` },
+    });
+    assert.deepStrictEqual(result, {
+      allowed: false,
+      status: "card_setup_unavailable",
+      sessionTypeId: TYPE,
+    });
+  } finally {
+    handler();
+    mock.restore();
+  }
+});
+
+test("booking approval policy is an anchored future hook and currently allows a normal booked claim", async () => {
+  const mock = mockFetch(({ url }) => {
+    if (url.includes("bookable_slots")) return response([{ id: SLOT, session_type_id: TYPE }]);
+    if (url.includes("session_types")) return response([{ id: TYPE, price_cents: 6000 }]);
+    if (url.includes("protection_policies")) {
+      return response([policyRow({ session_type_id: TYPE, require_card: false, booking_approval: true })]);
+    }
+    return response([]);
+  });
+  try {
+    const result = await protection.assessBookingGate({ coachId: COACH, athleteId: ATHLETE, slotId: SLOT });
+    assert.deepStrictEqual(result, { allowed: true, status: "allowed", sessionTypeId: TYPE });
+  } finally { mock.restore(); }
+});
 
 function policyRow(extra = {}) {
   return {
@@ -367,6 +448,72 @@ test("no-show duplicate taps return the original incident without a second PI or
     assert.strictEqual(db.calls.filter((c) => c.url.endsWith("/rest/v1/booking_charges") && c.method === "POST").length, 1);
     assert.strictEqual(mirrors.length, 1);
   } finally { db.restore(); }
+});
+
+test("no-show retries a failed pending insert with one ledger row and one Stripe idempotency key", async () => {
+  const db = noShowDb();
+  let attempts = 0;
+  const keys = [];
+  const fakeStripe = { paymentIntents: { create: async (args, options) => {
+    attempts++;
+    keys.push(options.idempotencyKey);
+    if (attempts === 1) throw new Error("Stripe timed out after insert");
+    return {
+      id: "pi_retry", amount: args.amount, amount_received: args.amount,
+      currency: "usd", created: 1, status: "succeeded", metadata: args.metadata,
+    };
+  } } };
+  try {
+    const h = handler({
+      getStripeSecretKey: () => "sk_test_fake",
+      createStripe: () => fakeStripe,
+    });
+    let out = res();
+    await h.postNoShow(req({ body: { slot_id: SLOT } }), out);
+    assert.strictEqual(out.statusCode, 502);
+    assert.strictEqual(db.getCharge().status, "failed", "the coach-visible row is never left falsely pending");
+
+    out = res();
+    await h.postNoShow(req({ body: { slot_id: SLOT } }), out);
+    assert.strictEqual(out.statusCode, 200);
+    assert.strictEqual(out.payload.charge.status, "succeeded");
+    assert.strictEqual(attempts, 2);
+    assert.deepStrictEqual(keys, [`booking-charge:${CHARGE}`, `booking-charge:${CHARGE}`]);
+    assert.strictEqual(
+      db.calls.filter((c) => c.url.endsWith("/rest/v1/booking_charges") && c.method === "POST").length,
+      1,
+      "retry reuses the incident row",
+    );
+  } finally { db.restore(); }
+});
+
+test("no-show reaches waitlist seam after charged, failed, requires-action, no-card, no-fee, and waived-policy outcomes", async () => {
+  const cases = [
+    { name: "charged", options: {}, stripe: null, status: 200 },
+    { name: "failed", options: {}, stripe: { paymentIntents: { create: async () => { throw new Error("timeout"); } } }, status: 502 },
+    { name: "requires-action", options: {}, stripe: { paymentIntents: { create: async (args) => {
+      const err = new Error("action");
+      err.payment_intent = { id: "pi_action_seam", status: "requires_action", amount: args.amount, currency: "usd", metadata: args.metadata };
+      throw err;
+    } } }, status: 402 },
+    { name: "no-card", options: { hasCard: false }, stripe: null, status: 409 },
+    { name: "no-fee", options: { feeType: "none", feeValue: 0 }, stripe: null, status: 409 },
+    { name: "waived-policy", options: { policyEnabled: false }, stripe: null, status: 409 },
+  ];
+  for (const c of cases) {
+    const db = noShowDb(c.options);
+    const seams = [];
+    try {
+      const out = res();
+      await handler({
+        getStripeSecretKey: c.stripe ? () => "sk_test_fake" : undefined,
+        createStripe: c.stripe ? () => c.stripe : undefined,
+        waitlistFill: () => seams.push(c.name),
+      }).postNoShow(req({ body: { slot_id: SLOT } }), out);
+      assert.strictEqual(out.statusCode, c.status, c.name);
+      assert.deepStrictEqual(seams, [c.name], c.name);
+    } finally { db.restore(); }
+  }
 });
 
 test("no-show reports protection_off, no_fee, and no_payment_method without creating a charge", async () => {

@@ -175,8 +175,8 @@ test("GET /coach/:slug/data returns sanitized public fields only", async () => {
 });
 
 // ===========================================================================
-// 3. book-guest happy path: creates the athlete, books the slot with the type,
-//    burns NO credit, mints a claim, returns { booked, claim_url }
+// 3. flags-off book-guest happy path: creates the athlete, validates and persists
+//    the optional type as master did, burns NO credit, and mints a claim.
 // ===========================================================================
 
 function guestHappyRoutes({ athleteMatch = null, reusableClaim = null } = {}) {
@@ -205,7 +205,7 @@ function guestHappyRoutes({ athleteMatch = null, reusableClaim = null } = {}) {
   ];
 }
 
-test("POST /coach/:slug/book-guest creates the athlete, books with the type, burns no credit, mints a claim", async () => {
+test("POST /coach/:slug/book-guest preserves flags-off type behavior, burns no credit, and mints a claim", async () => {
   const { server, port } = await startServer();
   const mock = installFetchMock(guestHappyRoutes());
   try {
@@ -234,7 +234,11 @@ test("POST /coach/:slug/book-guest creates the athlete, books with the type, bur
     assert.ok(claim, "the slot was claimed");
     assert.strictEqual(claim.body.status, "booked");
     assert.strictEqual(claim.body.booked_by, ATHLETE_ID);
-    assert.strictEqual(claim.body.session_type_id, TYPE_ID, "the chosen session type is stored on the slot");
+    assert.strictEqual(
+      claim.body.session_type_id,
+      TYPE_ID,
+      "with protection and payments off, the legacy booking path persists the optional type",
+    );
 
     // ZERO credit machinery: the guest lane never touches purchases or the ledger.
     assert.ok(
@@ -461,7 +465,7 @@ function inviteBookingRoutes() {
   ];
 }
 
-test("POST /schedule/:token/book stores the chosen session type on the slot", async () => {
+test("POST /schedule/:token/book persists a supplied coach-owned type when protection is off", async () => {
   const { server, port } = await startServer();
   const mock = installFetchMock(inviteBookingRoutes());
   try {
@@ -473,7 +477,11 @@ test("POST /schedule/:token/book stores the chosen session type on the slot", as
     assert.strictEqual(res.status, 200);
     const claim = mock.calls.find((c) => c.u.includes("/bookable_slots") && c.method === "PATCH" && c.u.includes("status=eq.open"));
     assert.ok(claim, "the slot was claimed");
-    assert.strictEqual(claim.body.session_type_id, TYPE_ID, "the invite-lane booking stores the picked type");
+    assert.strictEqual(claim.body.session_type_id, TYPE_ID, "the flags-off invite lane preserves master behavior");
+    assert.ok(
+      mock.calls.some((c) => c.u.includes("/session_types") && c.u.includes("id=eq.")),
+      "the flags-off invite lane validates ownership",
+    );
   } finally {
     mock.restore();
     server.close();

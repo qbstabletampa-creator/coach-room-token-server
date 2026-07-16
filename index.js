@@ -19,11 +19,15 @@ const { stripeWebhookHandler } = require("./lib/stripe-webhook");
 const { createSessionHandler } = require("./lib/checkout");
 const { buildSchedulingHandlers } = require("./lib/scheduling");
 const { buildStorefrontHandlers } = require("./lib/storefront");
-const { buildPaymentsHandlers } = require("./lib/payments");
+const { buildPaymentsHandlers, createCharge } = require("./lib/payments");
 const { buildDashboardHandlers } = require("./lib/dashboard");
 const { buildImportHandlers } = require("./lib/import");
 // MONEY_ROUND:IMPORT_PROTECTION:BEGIN
-const { buildProtectionHandlers } = require("./lib/protection");
+const {
+  buildProtectionHandlers,
+  assessBookingGate,
+  assessCancellationFee,
+} = require("./lib/protection");
 // MONEY_ROUND:IMPORT_PROTECTION:END
 // MONEY_ROUND:IMPORT_BILLING:BEGIN
 const { buildBillingHandlers } = require("./lib/billing");
@@ -1616,6 +1620,23 @@ if (CHECKOUT_ENABLED) {
   app.post("/checkout/create-session", checkoutLimiter, createSession);
 }
 
+// ---- Round-2 coach dashboard (additive, env-flag guarded OFF by default) -----
+// GET /coach/dashboard — the revenue/bookings/open-slots/needs-attention rollup.
+// Coach-authed (Supabase JWT, coachId from the verified token). Read-rate limited.
+// FOUNDATION: the handler is a 501 stub; the dashboard builder fills the rollup.
+// When DASHBOARD_ENABLED is unset the route does not register at all.
+if (DASHBOARD_ENABLED) {
+  const dashboardReadLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 60, // reading the dashboard is cheap; a coach may refresh a few times.
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many requests, slow down." },
+  });
+  const dashboard = buildDashboardHandlers({ requireSupabaseUser });
+  app.get("/coach/dashboard", dashboardReadLimiter, dashboard.getDashboard);
+}
+
 // ---- D12 scheduling routes (additive, env-flag guarded OFF by default) ------
 // Three athlete-facing routes keyed by a booking_invites token (no signup wall,
 // the invite token IS the athlete's identity) plus one coach-authed slot
@@ -1643,7 +1664,12 @@ if (SCHEDULING_ENABLED) {
     message: { error: "Too many generation requests, slow down." },
   });
 
-  const scheduling = buildSchedulingHandlers({ requireSupabaseUser, notify });
+  const scheduling = buildSchedulingHandlers({
+    requireSupabaseUser,
+    notify,
+    bookingGate: PROTECTION_ENABLED ? assessBookingGate : null,
+    cancellationFee: PROTECTION_ENABLED ? assessCancellationFee : null,
+  });
 
   app.get("/schedule/:inviteToken", scheduleReadLimiter, scheduling.getSchedule);
   app.post("/schedule/:inviteToken/book", scheduleWriteLimiter, scheduling.bookSlot);
@@ -1657,7 +1683,13 @@ if (SCHEDULING_ENABLED) {
   // /coach/slots and /coach/bookings routes above so the /coach/:slug param route
   // never shadows them (Express matches in registration order). Guest booking
   // reuses the scheduling write limiter (money-adjacent posture, tight cap).
-  const storefront = buildStorefrontHandlers({ notify });
+  const storefront = buildStorefrontHandlers({
+    notify,
+    bookingGate: PROTECTION_ENABLED ? assessBookingGate : null,
+    // The owed-charge log belongs to the PAYMENTS_ENABLED coach_charges model;
+    // checkout/webhook flags govern different Stripe provisioning lanes.
+    guestCharge: PAYMENTS_ENABLED ? createCharge : null,
+  });
   app.get("/coach/:slug", scheduleReadLimiter, storefront.getCoachPage);
   app.get("/coach/:slug/data", scheduleReadLimiter, storefront.getCoachData);
   app.post("/coach/:slug/book-guest", scheduleWriteLimiter, storefront.bookGuest);
@@ -1736,23 +1768,6 @@ if (BILLING_ENABLED) {
   app.post("/coach/subscriptions/cancel", billingLimiter, billing.postCancel);
 }
 // MONEY_ROUND:ROUTES_BILLING:END
-
-// ---- Round-2 coach dashboard (additive, env-flag guarded OFF by default) -----
-// GET /coach/dashboard — the revenue/bookings/open-slots/needs-attention rollup.
-// Coach-authed (Supabase JWT, coachId from the verified token). Read-rate limited.
-// FOUNDATION: the handler is a 501 stub; the dashboard builder fills the rollup.
-// When DASHBOARD_ENABLED is unset the route does not register at all.
-if (DASHBOARD_ENABLED) {
-  const dashboardReadLimiter = rateLimit({
-    windowMs: 60 * 1000,
-    max: 60, // reading the dashboard is cheap; a coach may refresh a few times.
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: { error: "Too many requests, slow down." },
-  });
-  const dashboard = buildDashboardHandlers({ requireSupabaseUser });
-  app.get("/coach/dashboard", dashboardReadLimiter, dashboard.getDashboard);
-}
 
 // ---- Round-2 bulk athlete import (additive, env-flag guarded OFF by default) --
 // POST /coach/athletes/import — paste a roster, one tap imports everyone + returns
