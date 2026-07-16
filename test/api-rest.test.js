@@ -361,3 +361,196 @@ test("POST /developer/keys rejects a non-coach caller with 403", async () => {
     server.close();
   }
 });
+
+test("full-surface read routes are key-authed and tenant-scoped", async () => {
+  const { server, port } = await startServer();
+  const mock = installFetchMock([
+    liveKeyRoute(),
+    { test: (u, m) => u.includes("/protection_policies?") && m === "GET", reply: () => ok([]) },
+    { test: (u, m) => u.includes("/billing_subscriptions?") && m === "GET", reply: () => ok([]) },
+    { test: (u, m) => u.includes("/coaches?") && m === "GET", reply: () => ok([{ id: COACH_ID, slug: "coach-a", full_name: "Coach A" }]) },
+    { test: (u, m) => u.includes("/sessions?") && u.includes("film_url=not.is.null") && m === "GET", reply: () => ok([{ id: ATHLETE_ID, film_url: "room/clip.mp4", title: "Rep" }]) },
+  ]);
+  try {
+    const cases = [
+      ["/api/v1/protection/policy", "default"],
+      ["/api/v1/subscriptions", "subscriptions"],
+      ["/api/v1/coach-page", "coach"],
+      ["/api/v1/clips", "clips"],
+      ["/api/v1/dashboard", "revenue"],
+      ["/api/v1/payments/overview", "owed"],
+    ];
+    for (const [path, key] of cases) {
+      const res = await request(port, { path, headers: authHdr });
+      assert.strictEqual(res.status, 200, path);
+      assert.ok(res.json[key] !== undefined, `${path} returns ${key}`);
+    }
+    const tenantReads = mock.calls.filter((c) => c.method === "GET" &&
+      /protection_policies|billing_subscriptions|coaches\?|sessions\?/.test(c.u));
+    assert.ok(tenantReads.length >= 4);
+    assert.ok(tenantReads.every((c) => c.u.includes(`coach_id=eq.${COACH_ID}`) || c.u.includes(`id=eq.${COACH_ID}`)));
+  } finally { mock.restore(); server.close(); }
+});
+
+test("money writes deny foreign rows before mutation", async () => {
+  const { server, port } = await startServer();
+  const mock = installFetchMock([
+    liveKeyRoute(),
+    { test: (u, m) => u.includes("/payments?") && u.includes(`coach_id=eq.${COACH_ID}`) && m === "GET", reply: () => ok([]) },
+    { test: (u, m) => u.includes("/booking_charges?") && u.includes(`coach_id=eq.${COACH_ID}`) && m === "GET", reply: () => ok([]) },
+  ]);
+  try {
+    const paymentId = "66666666-6666-4666-8666-666666666666";
+    let res = await request(port, { method: "POST", path: `/api/v1/payments/${paymentId}/void`, headers: authHdr, body: "{}" });
+    assert.strictEqual(res.status, 403);
+    assert.strictEqual(res.json.error, "cross_tenant");
+    res = await request(port, { method: "POST", path: `/api/v1/booking-charges/${paymentId}/waive`, headers: authHdr, body: "{}" });
+    assert.strictEqual(res.status, 403);
+    assert.strictEqual(res.json.error, "cross_tenant");
+    assert.ok(!mock.calls.some((c) => ["PATCH", "DELETE"].includes(c.method) &&
+      /\/payments\?|\/booking_charges\?/.test(c.u)), "foreign money rows are never mutated");
+  } finally { mock.restore(); server.close(); }
+});
+
+test("protection and billing configuration writes stay in the key tenant", async () => {
+  const { server, port } = await startServer();
+  const packageId = "77777777-7777-4777-8777-777777777777";
+  const mock = installFetchMock([
+    liveKeyRoute(),
+    { test: (u, m) => u.includes("/protection_policies") && m === "POST",
+      reply: (_u, _m, opts) => ok([{ id: packageId, ...JSON.parse(opts.body) }]) },
+    { test: (u, m) => u.includes("/packages?") && u.includes(`coach_id=eq.${COACH_ID}`) && m === "PATCH",
+      reply: (_u, _m, opts) => ok([{ id: packageId, coach_id: COACH_ID, ...JSON.parse(opts.body) }]) },
+  ]);
+  try {
+    let res = await request(port, { method: "PUT", path: "/api/v1/protection/policy", headers: authHdr,
+      body: JSON.stringify({ coachId: "99999999-9999-4999-8999-999999999999", enabled: true, require_card: true, free_cancel_hours: 24,
+        late_cancel_fee: { type: "percent", value: 50 }, no_show_fee: { type: "flat", value: 2500 } }) });
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.json.policy.enabled, true);
+    res = await request(port, { method: "PUT", path: `/api/v1/packages/${packageId}/billing-plan`, headers: authHdr,
+      body: JSON.stringify({ billing_type: "subscription", billing_interval: "month", grace_days: 3 }) });
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.json.package.billing_type, "subscription");
+    const policyWrite = mock.calls.find((c) => c.u.includes("/protection_policies") && c.method === "POST");
+    assert.strictEqual(policyWrite.body.coach_id, COACH_ID);
+    const planWrite = mock.calls.find((c) => c.u.includes("/packages?") && c.method === "PATCH");
+    assert.ok(planWrite.u.includes(`coach_id=eq.${COACH_ID}`));
+  } finally { mock.restore(); server.close(); }
+});
+
+test("every money mutation denies a foreign target through the real API core", async () => {
+  const { server, port } = await startServer();
+  const foreign = "99999999-9999-4999-8999-999999999999";
+  const mutationCalls = [];
+  const mock = installFetchMock([
+    liveKeyRoute(),
+    {
+      test: (u, m) => m === "GET" && /session_types|athletes|bookable_slots|booking_charges|payments|billing_subscriptions/.test(u),
+      reply: (u) => ok(u.includes(`coach_id=eq.${COACH_ID}`) ? [] : [{
+        id: foreign, coach_id: foreign, status: "active", stripe_subscription_id: "sub_foreign",
+      }]),
+    },
+    {
+      test: (_u, m) => ["POST", "PATCH", "DELETE"].includes(m),
+      reply: (u, m, opts) => {
+        const body = opts.body ? JSON.parse(opts.body) : {};
+        if (m === "POST" && /\/rest\/v1\/(payments|coach_charges)$/.test(u)) {
+          mutationCalls.push([u, m, body.coach_id]);
+          return ok([{ id: foreign, ...body }]);
+        }
+        if (/payments\?|coach_charges|booking_charges|packages\?|billing_subscriptions/.test(u)) {
+          if (!u.includes(`coach_id=eq.${COACH_ID}`)) mutationCalls.push([u, m]);
+          return ok(u.includes(`coach_id=eq.${COACH_ID}`) ? [] : [{ id: foreign }]);
+        }
+        return ok([]);
+      },
+    },
+  ]);
+  try {
+    const json = (body) => JSON.stringify({ coachId: foreign, ...body });
+    const cases = [
+      ["POST", "/api/v1/payments", json({ amount_cents: 500, collected_via: "cash", athlete_id: foreign }), 403],
+      ["POST", "/api/v1/charges", json({ label: "Foreign", amount_cents: 500, athlete_id: foreign }), 403],
+      ["POST", `/api/v1/payments/${foreign}/void`, json({}), 403],
+      ["POST", "/api/v1/booking-charges/no-show", json({ slot_id: foreign }), 403],
+      ["POST", `/api/v1/booking-charges/${foreign}/waive`, json({}), 403],
+      ["PUT", "/api/v1/protection/policy", json({ session_type_id: foreign, enabled: true,
+        free_cancel_hours: 24, late_cancel_fee: { type: "none", value: 0 },
+        no_show_fee: { type: "none", value: 0 } }), 403],
+      ["PUT", `/api/v1/packages/${foreign}/billing-plan`, json({ billing_type: "one_time" }), 404],
+      ["POST", `/api/v1/subscriptions/${foreign}/pause`, json({}), 404],
+      ["POST", `/api/v1/subscriptions/${foreign}/resume`, json({}), 404],
+      ["POST", `/api/v1/subscriptions/${foreign}/cancel`, json({ when: "now" }), 404],
+    ];
+    for (const [method, path, body, status] of cases) {
+      const res = await request(port, { method, path, headers: authHdr, body });
+      assert.strictEqual(res.status, status, path);
+    }
+    assert.deepStrictEqual(mutationCalls, [], "no foreign money/configuration row was mutated");
+  } finally { mock.restore(); server.close(); }
+});
+
+test("new ledger lists clamp abusive limits and apply offsets", async () => {
+  const { server, port } = await startServer();
+  const mock = installFetchMock([liveKeyRoute()]);
+  try {
+    for (const path of [
+      "/api/v1/booking-charges?limit=1000000000&offset=7",
+      "/api/v1/subscriptions?limit=1000000000&offset=7",
+      "/api/v1/payments/overview?limit=1000000000&offset=7",
+    ]) {
+      const res = await request(port, { path, headers: authHdr });
+      assert.strictEqual(res.status, 200, path);
+      assert.strictEqual(res.json.limit, 100, path);
+      assert.strictEqual(res.json.offset, 7, path);
+    }
+    const paged = mock.calls.filter((c) => /booking_charges|billing_subscriptions|payments\?/.test(c.u) && c.u.includes("limit=100"));
+    assert.ok(paged.length >= 3);
+    assert.ok(paged.every((c) => c.u.includes("offset=7")));
+  } finally { mock.restore(); server.close(); }
+});
+
+test("get_clip_url refuses a tampered stored path without calling the signer", async () => {
+  const { server, port } = await startServer();
+  const clipId = "88888888-8888-4888-8888-888888888888";
+  const mock = installFetchMock([
+    liveKeyRoute(),
+    { test: (u, m) => u.includes("/sessions?") && u.includes(`id=eq.${clipId}`) && m === "GET",
+      reply: () => ok([{ id: clipId, film_url: "foreign-room/../../secret.mp4" }]) },
+  ]);
+  try {
+    const res = await request(port, { method: "POST", path: `/api/v1/clips/${clipId}/url`, headers: authHdr, body: "{}" });
+    assert.strictEqual(res.status, 404);
+    assert.ok(!mock.calls.some((c) => c.u.includes("/storage/v1/object/sign/")), "tampered path was never signed");
+  } finally { mock.restore(); server.close(); }
+});
+
+test("REST policy and billing cores reject numeric values outside MCP bounds", async () => {
+  const { server, port } = await startServer();
+  const packageId = "77777777-7777-4777-8777-777777777777";
+  const mock = installFetchMock([liveKeyRoute()]);
+  try {
+    const policy = await request(port, { method: "PUT", path: "/api/v1/protection/policy", headers: authHdr,
+      body: JSON.stringify({ enabled: true, free_cancel_hours: 24,
+        late_cancel_fee: { type: "percent", value: 101 },
+        no_show_fee: { type: "flat", value: 12.5 } }) });
+    assert.strictEqual(policy.status, 400);
+    const plan = await request(port, { method: "PUT", path: `/api/v1/packages/${packageId}/billing-plan`, headers: authHdr,
+      body: JSON.stringify({ billing_type: "subscription", billing_interval: "month",
+        max_cycles: 1.5, trial_days: 366, grace_days: 91 }) });
+    assert.strictEqual(plan.status, 400);
+    assert.ok(!mock.calls.some((c) => ["protection_policies", "packages?"].some((part) => c.u.includes(part)) && c.method !== "GET"));
+  } finally { mock.restore(); server.close(); }
+});
+
+test("API roster import accepts a body above the global JSON limit", async () => {
+  const { server, port } = await startServer();
+  const mock = installFetchMock([liveKeyRoute()]);
+  try {
+    const body = JSON.stringify({ rows: [], options: { dry_run: true, padding: "x".repeat(150000) } });
+    const res = await request(port, { method: "POST", path: "/api/v1/athletes/import", headers: authHdr, body });
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.json.created, 0);
+  } finally { mock.restore(); server.close(); }
+});

@@ -65,6 +65,7 @@ const ROOM_TICKET_SECRET = process.env.ROOM_TICKET_SECRET;
 // bucket and are served only via short-lived signed URLs (never a world-readable
 // public URL). Bucket name is overridable for staging; default is clips-private.
 const CLIPS_BUCKET = process.env.CLIPS_BUCKET || "clips-private";
+const { resolveClipObjectPath } = require("./lib/clip-storage");
 // Signed-URL lifetime in seconds. 7 days: long enough for a coach to review a
 // rep over the following days without re-signing, short enough that a leaked URL
 // expires. The app re-signs on demand for older clips (see migration runbook).
@@ -266,6 +267,7 @@ if (IMPORT_ENABLED) {
 // handler (registered later, behind API_ENABLED) receives an intact req.body.
 if (API_ENABLED) {
   app.use("/mcp", express.json({ limit: "1mb" }));
+  app.use("/api/v1/athletes/import", express.json({ limit: "1mb" }));
 }
 
 app.use(express.json());
@@ -658,17 +660,6 @@ async function signClipUrl(objectPath) {
 // "../" path traversal is stripped (only [A-Za-z0-9._-] filenames are allowed).
 // Returns null if the filename is unusable. This is the authorization boundary
 // for /clips/sign: the signed object is pinned to the room the caller proved.
-const CLIP_FILENAME_RE = /^[A-Za-z0-9._-]{1,128}$/;
-function resolveClipObjectPath(room, ref) {
-  if (typeof ref !== "string" || !ref) return null;
-  // Take the last path segment (handles both "<room>/<file>" and "<file>", and
-  // neutralizes any "a/b/../c" traversal — the basename is all we keep).
-  const base = ref.split("/").filter(Boolean).pop() || "";
-  if (!CLIP_FILENAME_RE.test(base)) return null;
-  if (base === "." || base === "..") return null;
-  return `${room}/${base}`;
-}
-
 // ---- routes ----------------------------------------------------------------
 
 app.get("/health", (_req, res) => {
@@ -1889,7 +1880,7 @@ app.delete("/developer/keys/:id", developerKeyLimiter, async (req, res) => {
 
 // The key-authed REST surface + MCP endpoint, behind API_ENABLED (ships dark).
 if (API_ENABLED) {
-  const apiHandlers = buildApiHandlers({ notify });
+  const apiHandlers = buildApiHandlers({ notify, signClipUrl });
   const apiCore = apiHandlers.core;
 
   // Key-auth middleware: authenticate the Bearer API key, tenant-lock the
@@ -1950,6 +1941,29 @@ if (API_ENABLED) {
   // invites
   apiRouter.post("/invites", apiHandlers.createInvite);
   apiRouter.get("/invites", apiHandlers.listInvites);
+  // protection
+  apiRouter.get("/protection/policy", apiHandlers.getProtectionPolicy);
+  apiRouter.put("/protection/policy", apiHandlers.setProtectionPolicy);
+  apiRouter.get("/booking-charges", apiHandlers.listBookingCharges);
+  apiRouter.post("/booking-charges/no-show", apiHandlers.chargeNoShow);
+  apiRouter.post("/booking-charges/:id/waive", apiHandlers.waiveCharge);
+  // billing
+  apiRouter.put("/packages/:id/billing-plan", apiHandlers.createBillingPlan);
+  apiRouter.get("/subscriptions", apiHandlers.listSubscriptions);
+  apiRouter.get("/subscriptions/:id", apiHandlers.getSubscription);
+  apiRouter.post("/subscriptions/:id/pause", apiHandlers.pauseSubscription);
+  apiRouter.post("/subscriptions/:id/resume", apiHandlers.resumeSubscription);
+  apiRouter.post("/subscriptions/:id/cancel", apiHandlers.cancelSubscription);
+  // dashboard, payments, imports, storefront, clips
+  apiRouter.get("/dashboard", apiHandlers.getDashboard);
+  apiRouter.get("/payments/overview", apiHandlers.getPaymentsOverview);
+  apiRouter.post("/payments", apiHandlers.recordPayment);
+  apiRouter.post("/payments/:id/void", apiHandlers.voidPayment);
+  apiRouter.post("/charges", apiHandlers.createCharge);
+  apiRouter.post("/athletes/import", apiHandlers.importAthletes);
+  apiRouter.get("/coach-page", apiHandlers.getCoachPage);
+  apiRouter.get("/clips", apiHandlers.listClips);
+  apiRouter.post("/clips/:id/url", apiHandlers.getClipUrl);
 
   app.use("/api/v1", apiRouter);
 

@@ -59,3 +59,15 @@ test("POST /mcp 404s when API_ENABLED is off", async () => {
     server.close();
   }
 });
+
+test("new full-surface REST routes 404 when API_ENABLED is off", async () => {
+  const { server, port } = await startServer();
+  try {
+    for (const path of ["/api/v1/dashboard", "/api/v1/payments/overview", "/api/v1/clips"]) {
+      const res = await request(port, path, "GET", { authorization: "Bearer ctk_whatever" });
+      assert.strictEqual(res.status, 404, `${path} is absent until the flag is on`);
+    }
+  } finally {
+    server.close();
+  }
+});

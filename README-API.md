@@ -100,6 +100,26 @@ coach. List endpoints accept `limit` (1–100, default 50) and `offset`.
 | GET | `/api/v1/credit-balances` | Live credit balance per athlete (optional `?athlete_id=`) |
 | POST | `/api/v1/invites` | Mint a booking invite link (optional `athlete_id`/`slot_id`/`email`) |
 | GET | `/api/v1/invites` | List booking invites |
+| GET | `/api/v1/protection/policy` | Get default protection policy and service overrides |
+| PUT | `/api/v1/protection/policy` | Set a default or service-specific protection policy |
+| GET | `/api/v1/booking-charges` | List protection charges (`status`, `athlete_id`) |
+| POST | `/api/v1/booking-charges/no-show` | Mark an eligible slot no-show and charge its fee |
+| POST | `/api/v1/booking-charges/:id/waive` | Waive or refund a protection charge |
+| PUT | `/api/v1/packages/:id/billing-plan` | Set package billing shape and cadence |
+| GET | `/api/v1/subscriptions` | List athlete subscriptions |
+| GET | `/api/v1/subscriptions/:id` | Get one subscription |
+| POST | `/api/v1/subscriptions/:id/pause` | Pause a subscription |
+| POST | `/api/v1/subscriptions/:id/resume` | Resume a subscription |
+| POST | `/api/v1/subscriptions/:id/cancel` | Cancel now or at period end |
+| GET | `/api/v1/dashboard` | Get the coach business rollup |
+| GET | `/api/v1/payments/overview` | Get collected/owed totals and ledger |
+| POST | `/api/v1/payments` | Record a collected payment |
+| POST | `/api/v1/payments/:id/void` | Void a recorded payment |
+| POST | `/api/v1/charges` | Create an owed charge |
+| POST | `/api/v1/athletes/import` | Import up to 500 roster rows |
+| GET | `/api/v1/coach-page` | Get the coach's sanitized public-page data |
+| GET | `/api/v1/clips` | List clip-library metadata |
+| POST | `/api/v1/clips/:id/url` | Mint a short-lived signed clip URL |
 
 ### Key management (coach-login authed, not key authed)
 
@@ -113,13 +133,25 @@ coach. List endpoints accept `limit` (1–100, default 50) and `offset`.
 
 ## MCP tools
 
-`/mcp` is a stateless Streamable HTTP MCP server. It exposes 14 tools, all
+`/mcp` is a stateless Streamable HTTP MCP server. It exposes 34 tools, all
 tenant-locked to the key's coach:
 
 `list_athletes`, `get_athlete`, `create_athlete`, `update_athlete`,
 `list_sessions`, `get_session`, `list_slots`, `generate_slots`, `list_bookings`,
 `cancel_booking`, `list_packages`, `get_credit_balances`, `send_invite`,
 `list_invites`.
+
+Protection: `get_protection_policy`, `set_protection_policy`,
+`list_booking_charges`, `charge_no_show`, `waive_charge`.
+
+Billing: `create_billing_plan`, `list_subscriptions`, `get_subscription`,
+`pause_subscription`, `resume_subscription`, `cancel_subscription`.
+
+Dashboard and payments: `get_dashboard`, `get_payments_overview`,
+`record_payment`, `void_payment`, `create_charge`.
+
+Roster, storefront, and film: `import_athletes`, `get_coach_page`, `list_clips`,
+`get_clip_url`.
 
 ---
 
@@ -141,9 +173,9 @@ tenant-locked to the key's coach:
 - **Revocation is immediate.** A revoked key authenticates nothing (`401`).
 - **Audit log.** Every key-authed request records one `audit_log` row
   (method, path, status, ip, key, coach) for the owning coach to review.
-- **Clips are deliberately excluded.** Session clip URLs (a minor's video, with
-  a short signed-URL TTL) are **not** exposed on the API or MCP surface in v1, by
-  design. Clip access stays on the app's authenticated, signed-URL path only.
+- **Clip bytes remain private.** The API exposes tenant-scoped metadata and can
+  mint the same short-lived signed URLs as the app. It never exposes the bucket
+  publicly or accepts an arbitrary object path to sign.
 
 ## Errors
 

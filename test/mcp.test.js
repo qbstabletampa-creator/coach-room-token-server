@@ -15,6 +15,8 @@ process.env.SUPABASE_SERVICE_KEY = "test-service-key";
 process.env.API_ENABLED = "1";
 
 const { app } = require("../index.js");
+const { buildMcpServer } = require("../lib/mcp");
+const { buildApiHandlers } = require("../lib/api-rest");
 
 const COACH_ID = "33333333-3333-4333-8333-333333333333";
 const KEY_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -114,6 +116,26 @@ const EXPECTED_TOOLS = [
   "get_credit_balances",
   "send_invite",
   "list_invites",
+  "get_protection_policy",
+  "set_protection_policy",
+  "list_booking_charges",
+  "charge_no_show",
+  "waive_charge",
+  "create_billing_plan",
+  "list_subscriptions",
+  "get_subscription",
+  "pause_subscription",
+  "resume_subscription",
+  "cancel_subscription",
+  "get_dashboard",
+  "get_payments_overview",
+  "record_payment",
+  "void_payment",
+  "create_charge",
+  "import_athletes",
+  "get_coach_page",
+  "list_clips",
+  "get_clip_url",
 ];
 
 // ===========================================================================
@@ -141,7 +163,7 @@ test("POST /mcp initialize round-trips with a valid key", async () => {
 });
 
 // ===========================================================================
-// 2. tools/list returns all 14 tools
+// 2. tools/list returns all 34 tools
 // ===========================================================================
 test("POST /mcp tools/list returns the full tool set", async () => {
   const { server, port } = await startServer();
@@ -211,5 +233,81 @@ test("POST /mcp with no key returns 401", async () => {
   } finally {
     mock.restore();
     server.close();
+  }
+});
+
+test("every new MCP tool delegates a happy path with the server-derived coach id", async () => {
+  const calls = [];
+  const apiCore = new Proxy({}, { get: (_target, method) => async (args) => {
+    calls.push({ method: String(method), args });
+    return { status: 200, data: { ok: true } };
+  } });
+  const server = buildMcpServer({ apiCore, coachId: COACH_ID });
+  const cases = {
+    get_protection_policy: {},
+    set_protection_policy: { enabled: true, free_cancel_hours: 24,
+      late_cancel_fee: { type: "percent", value: 50 }, no_show_fee: { type: "flat", value: 2500 } },
+    list_booking_charges: {}, charge_no_show: { slot_id: ATHLETE_ID },
+    waive_charge: { charge_id: ATHLETE_ID },
+    create_billing_plan: { package_id: ATHLETE_ID, billing_type: "subscription", billing_interval: "month" },
+    list_subscriptions: {}, get_subscription: { athlete_id: ATHLETE_ID },
+    pause_subscription: { subscription_id: ATHLETE_ID }, resume_subscription: { subscription_id: ATHLETE_ID },
+    cancel_subscription: { subscription_id: ATHLETE_ID, when: "period_end" },
+    get_dashboard: {}, get_payments_overview: {},
+    record_payment: { amount_cents: 5000, collected_via: "cash", athlete_id: ATHLETE_ID },
+    void_payment: { payment_id: ATHLETE_ID }, create_charge: { label: "Lesson", amount_cents: 5000 },
+    import_athletes: { rows: [{ name: "New Athlete" }], options: { dry_run: true } },
+    get_coach_page: {}, list_clips: {}, get_clip_url: { clip_id: ATHLETE_ID },
+  };
+  for (const [name, args] of Object.entries(cases)) {
+    const result = await server._registeredTools[name].handler(args);
+    assert.strictEqual(result.isError, false, name);
+  }
+  assert.strictEqual(calls.length, Object.keys(cases).length);
+  assert.ok(calls.every((c) => c.args.coachId === COACH_ID), "all tools inject the key's coach id");
+  await server.close();
+});
+
+test("API and MCP subscription wrappers preserve shared input-validation precedence", async () => {
+  const realFetch = global.fetch;
+  const realUrl = process.env.SUPABASE_URL;
+  const realKey = process.env.SUPABASE_SERVICE_KEY;
+  const api = buildApiHandlers({ getStripeClient: () => { throw new Error("Stripe must not be reached"); } });
+  const server = buildMcpServer({ apiCore: api.core, coachId: COACH_ID });
+  const apiResponse = () => ({
+    statusCode: 200,
+    body: null,
+    status(code) { this.statusCode = code; return this; },
+    json(body) { this.body = body; return this; },
+  });
+  const cases = [
+    { id: ATHLETE_ID, when: "later", error: "invalid_when", unconfigured: false },
+    { id: "malformed", when: undefined, error: "invalid_subscription_id", unconfigured: true },
+    { id: ATHLETE_ID, when: "later", error: "invalid_when", unconfigured: true },
+  ];
+  try {
+    global.fetch = async () => { throw new Error("ownership must not be reached"); };
+    for (const c of cases) {
+      if (c.unconfigured) {
+        delete process.env.SUPABASE_URL;
+        delete process.env.SUPABASE_SERVICE_KEY;
+      }
+      const res = apiResponse();
+      await api.cancelSubscription({
+        apiKey: { coachId: COACH_ID }, params: { id: c.id }, body: { when: c.when },
+      }, res);
+      assert.deepStrictEqual([res.statusCode, res.body], [400, { error: c.error }]);
+
+      const result = await server._registeredTools.cancel_subscription.handler({
+        subscription_id: c.id, ...(c.when === undefined ? {} : { when: c.when }),
+      });
+      assert.strictEqual(result.isError, true);
+      assert.deepStrictEqual(JSON.parse(result.content[0].text), { error: c.error });
+    }
+  } finally {
+    global.fetch = realFetch;
+    process.env.SUPABASE_URL = realUrl;
+    process.env.SUPABASE_SERVICE_KEY = realKey;
+    await server.close();
   }
 });
