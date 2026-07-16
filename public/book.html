@@ -291,7 +291,7 @@
         <button id="typeSkip" class="type-skip" type="button">Skip, just show me times</button>
       </div>
 
-      <!-- MONEY_ROUND:PROTECTION_MARKUP:BEGIN --><!-- W1 --><!-- MONEY_ROUND:PROTECTION_MARKUP:END -->
+      <!-- MONEY_ROUND:PROTECTION_MARKUP:BEGIN --><div id="protectionPolicy" class="s-card" style="display:none;margin:16px 0"><h3 style="margin:0 0 6px">Booking protection</h3><p id="protectionCopy" style="margin:0"></p></div><!-- MONEY_ROUND:PROTECTION_MARKUP:END -->
       <!-- MONEY_ROUND:PLAN_MARKUP:BEGIN --><!-- W2 --><!-- MONEY_ROUND:PLAN_MARKUP:END -->
 
       <div id="timesArea" style="display:none">
@@ -457,7 +457,25 @@
   var selectedTypeName = "";
 
   // MONEY_ROUND:PROTECTION_JS:BEGIN
-  // W1
+  var protectionPolicy = document.getElementById("protectionPolicy");
+  var protectionCopy = document.getElementById("protectionCopy");
+  async function loadProtectionPolicy() {
+    try {
+      var q = selectedTypeId ? "?session_type_id=" + encodeURIComponent(selectedTypeId) : "";
+      var resp = await fetch(window.location.origin + "/protection/invite/" + encodeURIComponent(inviteToken) + q, {
+        method: "GET", headers: { "Accept": "application/json" }
+      });
+      var data = null; try { data = await resp.json(); } catch (e) {}
+      var policy = data && data.policy;
+      if (resp.ok && policy && policy.enabled && typeof policy.copy === "string") {
+        protectionCopy.textContent = policy.copy;
+        protectionPolicy.style.display = "";
+      } else { protectionPolicy.style.display = "none"; protectionCopy.textContent = ""; }
+    } catch (e) { protectionPolicy.style.display = "none"; protectionCopy.textContent = ""; }
+  }
+  typeList.addEventListener("click", function () { setTimeout(loadProtectionPolicy, 0); });
+  typeSkip.addEventListener("click", function () { setTimeout(loadProtectionPolicy, 0); });
+  loadProtectionPolicy();
   // MONEY_ROUND:PROTECTION_JS:END
   // MONEY_ROUND:PLAN_JS:BEGIN
   // W2
@@ -798,6 +816,12 @@
       var data = null;
       try { data = await resp.json(); } catch (e) {}
 
+      if (resp.status === 402 && data && data.error === "needs_card") {
+        var setupUrl = httpsUrl(data.setup_url);
+        if (setupUrl) window.location.assign(setupUrl);
+        else showSheetErr("Add a card to book this time.");
+        return;
+      }
       if (resp.status === 402) {
         // No credits: friendly panel, never a dead end. The server sends a
         // checkoutHint { path, message }; that path is a POST checkout endpoint,

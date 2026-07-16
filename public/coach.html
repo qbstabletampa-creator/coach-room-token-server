@@ -255,7 +255,7 @@
         <div class="types" id="typeList"></div>
       </div>
 
-      <!-- MONEY_ROUND:PROTECTION_MARKUP:BEGIN --><!-- W1 --><!-- MONEY_ROUND:PROTECTION_MARKUP:END -->
+      <!-- MONEY_ROUND:PROTECTION_MARKUP:BEGIN --><div id="protectionPolicy" class="section" style="display:none"><p class="section-k">Booking protection</p><p id="protectionCopy" style="margin:0"></p></div><!-- MONEY_ROUND:PROTECTION_MARKUP:END -->
       <!-- MONEY_ROUND:PLAN_MARKUP:BEGIN --><!-- W2 --><!-- MONEY_ROUND:PLAN_MARKUP:END -->
 
       <!-- Your first session -->
@@ -725,7 +725,24 @@ var QR = (function () {
   var selectedSlot = null;
 
   // MONEY_ROUND:PROTECTION_JS:BEGIN
-  // W1
+  var protectionPolicy = document.getElementById("protectionPolicy");
+  var protectionCopy = document.getElementById("protectionCopy");
+  async function loadProtectionPolicy() {
+    try {
+      var q = selectedTypeId ? "?session_type_id=" + encodeURIComponent(selectedTypeId) : "";
+      var resp = await fetch(window.location.origin + "/protection/" + encodeURIComponent(slug) + q, {
+        method: "GET", headers: { "Accept": "application/json" }
+      });
+      var data = null; try { data = await resp.json(); } catch (e) {}
+      var policy = data && data.policy;
+      if (resp.ok && policy && policy.enabled && typeof policy.copy === "string") {
+        protectionCopy.textContent = policy.copy;
+        protectionPolicy.style.display = "";
+      } else { protectionPolicy.style.display = "none"; protectionCopy.textContent = ""; }
+    } catch (e) { protectionPolicy.style.display = "none"; protectionCopy.textContent = ""; }
+  }
+  typeList.addEventListener("click", function () { setTimeout(loadProtectionPolicy, 0); });
+  loadProtectionPolicy();
   // MONEY_ROUND:PROTECTION_JS:END
   // MONEY_ROUND:PLAN_JS:BEGIN
   // W2
@@ -893,6 +910,12 @@ var QR = (function () {
       });
       var data = null; try { data = await resp.json(); } catch (e) {}
 
+      if (resp.status === 402 && data && data.error === "needs_card") {
+        var setupUrl = httpsUrl(data.setup_url);
+        if (setupUrl) window.location.assign(setupUrl);
+        else showSheetErr("Add a card to book this time.");
+        return;
+      }
       if (resp.status === 409) {
         showSheetErr("That time was just taken. Pick another open slot.");
         confirmBtn.disabled = false; confirmBtn.textContent = "Pick another time";
