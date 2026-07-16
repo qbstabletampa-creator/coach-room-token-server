@@ -71,6 +71,9 @@ const {
   formsClaimGateFragment,
 } = require("./lib/forms");
 // COMPARE_GAP:FORMS:IMPORT:END
+// COMPARE_GAP:AI_NOTES:IMPORT:BEGIN
+const { buildAiNotesHandlers } = require("./lib/ai-notes");
+// COMPARE_GAP:AI_NOTES:IMPORT:END
 const { buildAccountDeleteHandler } = require("./lib/account-delete");
 // Open API + MCP layer (build brief: feat/open-api-mcp). Additive; every route
 // below is gated by API_ENABLED (default OFF), so requiring these here is inert
@@ -184,6 +187,9 @@ const WAITLIST_ENABLED = envFlag("WAITLIST_ENABLED");
 // COMPARE_GAP:FORMS:FLAG:BEGIN
 const FORMS_ENABLED = envFlag("FORMS_ENABLED");
 // COMPARE_GAP:FORMS:FLAG:END
+// COMPARE_GAP:AI_NOTES:FLAG:BEGIN
+const AI_NOTES_ENABLED = envFlag("AI_NOTES_ENABLED");
+// COMPARE_GAP:AI_NOTES:FLAG:END
 // API_ENABLED gates the entire open API + MCP surface: the /api/v1 REST cluster
 // and the /mcp MCP endpoint (plus the /mcp body carve-out below). OFF by default
 // so the whole layer ships dark — completely inert in production until CJ flips
@@ -2008,6 +2014,44 @@ if (FORMS_ENABLED) {
   app.get("/coach/athletes/:id/forms", formsCoachReadLimiter, forms.getAthleteForms);
 }
 // COMPARE_GAP:FORMS:ROUTES:END
+// COMPARE_GAP:AI_NOTES:ROUTES:BEGIN
+if (AI_NOTES_ENABLED) {
+  const aiNotesReadLimiter = rateLimit({
+    windowMs: 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false,
+    message: { error: "too_many_requests" },
+  });
+  const aiNotesWriteLimiter = rateLimit({
+    windowMs: 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false,
+    message: { error: "too_many_requests" },
+  });
+  const aiNotesAudioLimiter = rateLimit({
+    windowMs: 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false,
+    message: { error: "too_many_requests" },
+  });
+  const aiNotesGenerateLimiter = rateLimit({
+    windowMs: 60 * 1000, max: 5, standardHeaders: true, legacyHeaders: false,
+    message: { error: "too_many_requests" },
+  });
+  const aiNotes = buildAiNotesHandlers({ requireSupabaseUser, notify });
+  app.post(
+    "/ai-notes/:sessionId/audio",
+    aiNotesAudioLimiter,
+    express.raw({
+      type: ["audio/mp4", "audio/m4a", "audio/x-m4a", "application/octet-stream"],
+      limit: "25mb",
+    }),
+    aiNotes.postAudio,
+  );
+  app.delete(
+    "/ai-notes/:sessionId/audio/:requestId",
+    aiNotesWriteLimiter,
+    aiNotes.deleteAudio,
+  );
+  app.post("/ai-notes/:sessionId/generate", aiNotesGenerateLimiter, aiNotes.postGenerate);
+  app.get("/ai-notes/:sessionId", aiNotesReadLimiter, aiNotes.getNote);
+  app.post("/ai-notes/:sessionId/share", aiNotesWriteLimiter, aiNotes.postShare);
+}
+// COMPARE_GAP:AI_NOTES:ROUTES:END
 // COMPARE_GAP:CALENDAR:ROUTES:BEGIN
 if (SCHEDULING_ENABLED && CALENDAR_SYNC_ENABLED) {
   const calendarReadLimiter = rateLimit({
@@ -2357,6 +2401,9 @@ module.exports = {
   // COMPARE_GAP:FORMS:EXPORT:BEGIN
   buildFormsHandlers,
   // COMPARE_GAP:FORMS:EXPORT:END
+  // COMPARE_GAP:AI_NOTES:EXPORT:BEGIN
+  buildAiNotesHandlers,
+  // COMPARE_GAP:AI_NOTES:EXPORT:END
   // COMPARE_GAP:CALENDAR:EXPORT:BEGIN
   buildCalendarHandlers,
   mirrorCalendarBooking,
