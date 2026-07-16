@@ -29,6 +29,21 @@ const { buildProtectionHandlers } = require("./lib/protection");
 const { buildBillingHandlers } = require("./lib/billing");
 // MONEY_ROUND:IMPORT_BILLING:END
 const { buildAccountDeleteHandler } = require("./lib/account-delete");
+// Open API + MCP layer (build brief: feat/open-api-mcp). Additive; every route
+// below is gated by API_ENABLED (default OFF), so requiring these here is inert
+// in production until CJ flips the flag. Each module reads env at call time.
+const {
+  mintApiKey,
+  revokeApiKey,
+  listApiKeys,
+  requireApiKey,
+} = require("./lib/api-keys");
+const { auditOnFinish } = require("./lib/audit");
+const { buildApiHandlers } = require("./lib/api-rest");
+const {
+  buildMcpHandler,
+  mcpMethodNotAllowed,
+} = require("./lib/mcp");
 
 const PORT = process.env.PORT || 3130;
 const LIVEKIT_URL = process.env.LIVEKIT_URL;
@@ -104,6 +119,14 @@ const PROTECTION_ENABLED = envFlag("PROTECTION_ENABLED");
 // MONEY_ROUND:FLAG_BILLING:BEGIN
 const BILLING_ENABLED = envFlag("BILLING_ENABLED");
 // MONEY_ROUND:FLAG_BILLING:END
+// API_ENABLED gates the entire open API + MCP surface: the /api/v1 REST cluster
+// and the /mcp MCP endpoint (plus the /mcp body carve-out below). OFF by default
+// so the whole layer ships dark — completely inert in production until CJ flips
+// it on. Same additive, guarded posture as the payments/scheduling flags. NOTE:
+// the developer key-management routes (/developer/keys) are authed by the coach
+// Supabase JWT and register regardless, so a coach can mint keys before the
+// surface those keys unlock is switched on.
+const API_ENABLED = envFlag("API_ENABLED");
 
 if (!LIVEKIT_API_KEY || !LIVEKIT_API_SECRET || !LIVEKIT_URL) {
   console.error(
@@ -233,6 +256,16 @@ if (STRIPE_WEBHOOK_ENABLED) {
 // parser skips this path (no double-parse). Gated OFF by default.
 if (IMPORT_ENABLED) {
   app.use("/coach/athletes/import", express.json({ limit: "1mb" }));
+}
+
+// MCP body carve-out (build brief landmine #3). The MCP Streamable HTTP handler
+// needs the request body; the global express.json() below would consume it
+// first. Same fix as the Stripe raw-body mount above: register a route-scoped
+// JSON parser for /mcp BEFORE the global one. express.json sets req._body, so
+// the global express.json() skips this path (no double-parse) and the /mcp
+// handler (registered later, behind API_ENABLED) receives an intact req.body.
+if (API_ENABLED) {
+  app.use("/mcp", express.json({ limit: "1mb" }));
 }
 
 app.use(express.json());
@@ -1773,6 +1806,168 @@ if (IMPORT_ENABLED) {
   app.post("/coach/athletes/import", importWriteLimiter, importer.importAthletes);
 }
 
+// ---- Open API + MCP layer (build brief: feat/open-api-mcp) ------------------
+// A coach mints a tenant-scoped API key from the app and plugs their own AI
+// (Claude, agents) into their coaching business over /api/v1 (REST) and /mcp
+// (MCP). Every request is tenant-locked to the key's coach_id server-side.
+
+// Coach-JWT gate for the developer key-management routes. Verifies the Supabase
+// user JWT (same primitive the rest of the server uses), requires the coach
+// role (like sendInvite/coachCancelBooking), and hands back the coach id. On any
+// failure it sends the response and returns null.
+async function requireCoachForKeys(req, res) {
+  const authd = await requireSupabaseUser(req);
+  if (authd.error) {
+    res.status(authd.status || 401).json({ error: authd.error });
+    return null;
+  }
+  const user = authd.user;
+  const isCoach =
+    user.user_metadata?.role === "coach" || user.app_metadata?.role === "coach";
+  if (!isCoach) {
+    res.status(403).json({ error: "coach access required" });
+    return null;
+  }
+  return user.id;
+}
+
+// Developer key management. Authed by the coach Supabase JWT (the coach manages
+// keys from the app), tenant-locked to authd.user.id. Registered regardless of
+// API_ENABLED so a coach can mint keys before the surface those keys unlock is
+// switched on; the minted key is inert until API_ENABLED flips /api/v1 + /mcp on.
+const developerKeyLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 20, // key mgmt is rare and human-scale.
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many key requests, slow down." },
+});
+
+// POST /developer/keys { name } -> { key (PLAINTEXT, shown once), id, prefix, ... }
+app.post("/developer/keys", developerKeyLimiter, async (req, res) => {
+  try {
+    const coachId = await requireCoachForKeys(req, res);
+    if (!coachId) return; // response already sent
+    const name = req.body && req.body.name;
+    const out = await mintApiKey({ coachId, name });
+    if (out.error) return res.status(out.status).json({ error: out.error });
+    // The plaintext `key` is present ONLY on this response. Never retrievable again.
+    res.status(201).json(out);
+  } catch (err) {
+    console.error("[developer-keys] mint error:", err);
+    res.status(500).json({ error: "could not create key" });
+  }
+});
+
+// GET /developer/keys -> { keys: [...] } (metadata only, never the hash/plaintext)
+app.get("/developer/keys", developerKeyLimiter, async (req, res) => {
+  try {
+    const coachId = await requireCoachForKeys(req, res);
+    if (!coachId) return;
+    const out = await listApiKeys({ coachId });
+    if (out.error) return res.status(out.status).json({ error: out.error });
+    res.json(out);
+  } catch (err) {
+    console.error("[developer-keys] list error:", err);
+    res.status(500).json({ error: "could not list keys" });
+  }
+});
+
+// DELETE /developer/keys/:id -> { revoked: bool } (tenant-locked to the coach)
+app.delete("/developer/keys/:id", developerKeyLimiter, async (req, res) => {
+  try {
+    const coachId = await requireCoachForKeys(req, res);
+    if (!coachId) return;
+    const out = await revokeApiKey({ coachId, keyId: req.params.id });
+    if (out.error) return res.status(out.status).json({ error: out.error });
+    res.json(out);
+  } catch (err) {
+    console.error("[developer-keys] revoke error:", err);
+    res.status(500).json({ error: "could not revoke key" });
+  }
+});
+
+// The key-authed REST surface + MCP endpoint, behind API_ENABLED (ships dark).
+if (API_ENABLED) {
+  const apiHandlers = buildApiHandlers({ notify });
+  const apiCore = apiHandlers.core;
+
+  // Key-auth middleware: authenticate the Bearer API key, tenant-lock the
+  // request to its coach_id, and wire the audit-on-finish hook. Runs BEFORE the
+  // per-key rate limiter so the limiter's keyGenerator can read req.apiKey.id.
+  // (Tradeoff: an unauthenticated flood still pays one key lookup before being
+  // rejected; acceptable for v1, revisit if abused.)
+  async function apiKeyAuth(req, res, next) {
+    const authd = await requireApiKey(req);
+    if (authd.error) return res.status(authd.status).json({ error: authd.error });
+    req.apiKey = authd.apiKey;
+    auditOnFinish(req, res, {
+      apiKeyId: req.apiKey.id,
+      coachId: req.apiKey.coachId,
+    });
+    next();
+  }
+
+  // Per-key rate limiting: window is 1 minute, max is the key's own rate_limit
+  // (default 60). Keyed by the api key id (falls back to IP for the rare
+  // unauthed case that slips through). In-memory store: resets on deploy, which
+  // is acceptable for v1 (same posture as every other limiter here).
+  const apiKeyLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: (req) => (req.apiKey && req.apiKey.rateLimit) || 60,
+    keyGenerator: (req) => (req.apiKey && req.apiKey.id) || req.ip,
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: false, // custom keyGenerator returns a key id, not an IP
+    message: { error: "rate limit exceeded for this API key" },
+  });
+
+  const apiRouter = express.Router();
+  apiRouter.use(apiKeyAuth);
+  apiRouter.use(apiKeyLimiter);
+
+  // athletes
+  apiRouter.get("/athletes", apiHandlers.listAthletes);
+  apiRouter.get("/athletes/:id", apiHandlers.getAthlete);
+  apiRouter.post("/athletes", apiHandlers.createAthlete);
+  apiRouter.patch("/athletes/:id", apiHandlers.updateAthlete);
+  apiRouter.delete("/athletes/:id", apiHandlers.deleteAthlete);
+  // sessions
+  apiRouter.get("/sessions", apiHandlers.listSessions);
+  apiRouter.get("/sessions/:id", apiHandlers.getSession);
+  apiRouter.post("/sessions", apiHandlers.createSession);
+  apiRouter.patch("/sessions/:id", apiHandlers.updateSession);
+  // slots
+  apiRouter.get("/slots", apiHandlers.listSlots);
+  apiRouter.post("/slots/generate", apiHandlers.generateSlots);
+  // bookings
+  apiRouter.get("/bookings", apiHandlers.listBookings);
+  apiRouter.post("/bookings/cancel", apiHandlers.cancelBooking);
+  // packages + credits
+  apiRouter.get("/packages", apiHandlers.listPackages);
+  apiRouter.get("/purchases", apiHandlers.listPurchases);
+  apiRouter.get("/credit-balances", apiHandlers.getCreditBalances);
+  // invites
+  apiRouter.post("/invites", apiHandlers.createInvite);
+  apiRouter.get("/invites", apiHandlers.listInvites);
+
+  app.use("/api/v1", apiRouter);
+
+  // MCP endpoint. Body was already parsed by the /mcp carve-out mounted before
+  // express.json(). Auth is the coach API key -> the SAME requireApiKey -> the
+  // SAME tenant lock. onRequestAuthed wires the audit hook once the key is known.
+  const mcpHandler = buildMcpHandler({
+    requireApiKey,
+    apiCore,
+    onRequestAuthed: (req, res, apiKey) =>
+      auditOnFinish(req, res, { apiKeyId: apiKey.id, coachId: apiKey.coachId }),
+  });
+  app.post("/mcp", mcpHandler);
+  // Stateless MCP: GET/DELETE (session streams/termination) are not used.
+  app.get("/mcp", mcpMethodNotAllowed);
+  app.delete("/mcp", mcpMethodNotAllowed);
+}
+
 // Only bind the port when run directly (node index.js). When required by a test
 // (require.main !== module) we export the pure helpers for unit testing and skip
 // listen(), so tests never open a socket or need live LiveKit/Supabase creds.
@@ -1813,4 +2008,11 @@ module.exports = {
   buildImportHandlers,
   // Account deletion (D1). Exported for unit tests + future callers.
   buildAccountDeleteHandler,
+  // Open API + MCP layer (feat/open-api-mcp). Exported for unit tests.
+  mintApiKey,
+  revokeApiKey,
+  listApiKeys,
+  requireApiKey,
+  buildApiHandlers,
+  buildMcpHandler,
 };
