@@ -38,6 +38,13 @@ const { buildVideoReviewHandlers } = require("./lib/video-review");
 // COMPARE_GAP:HOMEWORK:IMPORT:BEGIN
 const { buildAccountabilityHandlers } = require("./lib/accountability");
 // COMPARE_GAP:HOMEWORK:IMPORT:END
+// COMPARE_GAP:CALENDAR:IMPORT:BEGIN
+const {
+  buildCalendarHandlers,
+  mirrorCalendarBooking,
+  cancelCalendarBooking,
+} = require("./lib/calendar-sync");
+// COMPARE_GAP:CALENDAR:IMPORT:END
 const { buildAccountDeleteHandler } = require("./lib/account-delete");
 // Open API + MCP layer (build brief: feat/open-api-mcp). Additive; every route
 // below is gated by API_ENABLED (default OFF), so requiring these here is inert
@@ -136,6 +143,9 @@ const REVIEWS_ENABLED = envFlag("REVIEWS_ENABLED");
 // COMPARE_GAP:HOMEWORK:FLAG:BEGIN
 const ACCOUNTABILITY_ENABLED = envFlag("ACCOUNTABILITY_ENABLED");
 // COMPARE_GAP:HOMEWORK:FLAG:END
+// COMPARE_GAP:CALENDAR:FLAG:BEGIN
+const CALENDAR_SYNC_ENABLED = envFlag("CALENDAR_SYNC_ENABLED");
+// COMPARE_GAP:CALENDAR:FLAG:END
 // API_ENABLED gates the entire open API + MCP surface: the /api/v1 REST cluster
 // and the /mcp MCP endpoint (plus the /mcp body carve-out below). OFF by default
 // so the whole layer ships dark — completely inert in production until CJ flips
@@ -1869,6 +1879,35 @@ if (ACCOUNTABILITY_ENABLED) {
   app.get("/hw/:completeToken", homeworkPublicReadLimiter, homework.getPublicPage);
 }
 // COMPARE_GAP:HOMEWORK:ROUTES:END
+// COMPARE_GAP:CALENDAR:ROUTES:BEGIN
+if (SCHEDULING_ENABLED && CALENDAR_SYNC_ENABLED) {
+  const calendarReadLimiter = rateLimit({
+    windowMs: 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false,
+    message: { error: "too_many_requests" },
+  });
+  const calendarWriteLimiter = rateLimit({
+    windowMs: 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false,
+    message: { error: "too_many_requests" },
+  });
+  const calendarPublicLimiter = rateLimit({
+    windowMs: 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false,
+    message: { error: "too_many_requests" },
+  });
+  const calendarCallbackLimiter = rateLimit({
+    windowMs: 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false,
+    message: { error: "too_many_requests" },
+  });
+  const calendar = buildCalendarHandlers({ requireSupabaseUser });
+  app.get("/calendar/connection", calendarReadLimiter, calendar.getConnection);
+  app.post("/calendar/feed/reset", calendarWriteLimiter, calendar.postFeedReset);
+  app.delete("/calendar/feed", calendarWriteLimiter, calendar.deleteFeed);
+  app.post("/calendar/google/connect", calendarWriteLimiter, calendar.postGoogleConnect);
+  app.get("/calendar/google/callback", calendarCallbackLimiter, calendar.getGoogleCallback);
+  app.delete("/calendar/google", calendarWriteLimiter, calendar.deleteGoogle);
+  app.get("/calendar/:coachId/feed.ics", calendarPublicLimiter, calendar.getFeed);
+  app.get("/cron/calendar-sync", calendar.getCronSync);
+}
+// COMPARE_GAP:CALENDAR:ROUTES:END
 
 // ---- Round-2 bulk athlete import (additive, env-flag guarded OFF by default) --
 // POST /coach/athletes/import — paste a roster, one tap imports everyone + returns
@@ -2114,6 +2153,11 @@ module.exports = {
   // COMPARE_GAP:HOMEWORK:EXPORT:BEGIN
   buildAccountabilityHandlers,
   // COMPARE_GAP:HOMEWORK:EXPORT:END
+  // COMPARE_GAP:CALENDAR:EXPORT:BEGIN
+  buildCalendarHandlers,
+  mirrorCalendarBooking,
+  cancelCalendarBooking,
+  // COMPARE_GAP:CALENDAR:EXPORT:END
   // Round-2 dashboard + import (additive, foundation stubs). Exported for unit
   // tests + the feature builders that fill the internals.
   buildDashboardHandlers,
