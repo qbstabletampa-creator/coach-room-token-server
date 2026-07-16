@@ -45,6 +45,13 @@ const {
   cancelCalendarBooking,
 } = require("./lib/calendar-sync");
 // COMPARE_GAP:CALENDAR:IMPORT:END
+// COMPARE_GAP:REMINDERS:IMPORT:BEGIN
+const {
+  buildReminderSettingsHandlers,
+  buildReminderRulesProvider,
+} = require("./lib/reminder-settings");
+const { buildRemindersHandler } = require("./lib/reminders");
+// COMPARE_GAP:REMINDERS:IMPORT:END
 const { buildAccountDeleteHandler } = require("./lib/account-delete");
 // Open API + MCP layer (build brief: feat/open-api-mcp). Additive; every route
 // below is gated by API_ENABLED (default OFF), so requiring these here is inert
@@ -146,6 +153,9 @@ const ACCOUNTABILITY_ENABLED = envFlag("ACCOUNTABILITY_ENABLED");
 // COMPARE_GAP:CALENDAR:FLAG:BEGIN
 const CALENDAR_SYNC_ENABLED = envFlag("CALENDAR_SYNC_ENABLED");
 // COMPARE_GAP:CALENDAR:FLAG:END
+// COMPARE_GAP:REMINDERS:FLAG:BEGIN
+const REMINDERS_EDITOR_ENABLED = envFlag("REMINDERS_EDITOR_ENABLED");
+// COMPARE_GAP:REMINDERS:FLAG:END
 // API_ENABLED gates the entire open API + MCP surface: the /api/v1 REST cluster
 // and the /mcp MCP endpoint (plus the /mcp body carve-out below). OFF by default
 // so the whole layer ships dark — completely inert in production until CJ flips
@@ -1744,11 +1754,6 @@ if (SCHEDULING_ENABLED) {
   app.get("/coach/:slug", scheduleReadLimiter, storefront.getCoachPage);
   app.get("/coach/:slug/data", scheduleReadLimiter, storefront.getCoachData);
   app.post("/coach/:slug/book-guest", scheduleWriteLimiter, storefront.bookGuest);
-
-  // Reminders cron endpoint. Flag-gated with the rest of scheduling; the
-  // handler itself enforces the cron secret. Logic lives in lib/reminders.js.
-  const { buildRemindersHandler } = require("./lib/reminders");
-  app.get("/cron/reminders", buildRemindersHandler({ notify }));
 }
 
 // ---- Phase 1 payments routes (additive, env-flag guarded OFF by default) -----
@@ -1908,6 +1913,41 @@ if (SCHEDULING_ENABLED && CALENDAR_SYNC_ENABLED) {
   app.get("/cron/calendar-sync", calendar.getCronSync);
 }
 // COMPARE_GAP:CALENDAR:ROUTES:END
+// COMPARE_GAP:REMINDERS:ROUTES:BEGIN
+const reminderRulesProvider = REMINDERS_EDITOR_ENABLED
+  ? buildReminderRulesProvider()
+  : null;
+
+// Preserve the shipped scheduling-owned cron when the new lane is dark; allow
+// the rule engine to run independently when the editor lane is enabled.
+if (SCHEDULING_ENABLED || REMINDERS_EDITOR_ENABLED) {
+  app.get(
+    "/cron/reminders",
+    buildRemindersHandler({
+      notify,
+      rulesProvider: reminderRulesProvider,
+    }),
+  );
+}
+
+if (REMINDERS_EDITOR_ENABLED) {
+  const remindersReadLimiter = rateLimit({
+    windowMs: 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false,
+    message: { error: "too_many_requests" },
+  });
+  const remindersWriteLimiter = rateLimit({
+    windowMs: 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false,
+    message: { error: "too_many_requests" },
+  });
+  const reminders = buildReminderSettingsHandlers({ requireSupabaseUser });
+  app.get("/reminders/rules", remindersReadLimiter, reminders.getRules);
+  app.post("/reminders/rules", remindersWriteLimiter, reminders.postRule);
+  app.patch("/reminders/rules/:id", remindersWriteLimiter, reminders.patchRule);
+  app.delete("/reminders/rules/:id", remindersWriteLimiter, reminders.deleteRule);
+  app.get("/reminders/settings", remindersReadLimiter, reminders.getSettings);
+  app.patch("/reminders/settings", remindersWriteLimiter, reminders.patchSettings);
+}
+// COMPARE_GAP:REMINDERS:ROUTES:END
 
 // ---- Round-2 bulk athlete import (additive, env-flag guarded OFF by default) --
 // POST /coach/athletes/import — paste a roster, one tap imports everyone + returns
@@ -2158,6 +2198,10 @@ module.exports = {
   mirrorCalendarBooking,
   cancelCalendarBooking,
   // COMPARE_GAP:CALENDAR:EXPORT:END
+  // COMPARE_GAP:REMINDERS:EXPORT:BEGIN
+  buildReminderSettingsHandlers,
+  buildReminderRulesProvider,
+  // COMPARE_GAP:REMINDERS:EXPORT:END
   // Round-2 dashboard + import (additive, foundation stubs). Exported for unit
   // tests + the feature builders that fill the internals.
   buildDashboardHandlers,
