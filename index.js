@@ -1753,6 +1753,32 @@ if (DASHBOARD_ENABLED) {
   app.get("/coach/dashboard", dashboardReadLimiter, dashboard.getDashboard);
 }
 
+// INTEGRATOR:WAITLIST_FORMS:FACTORIES:BEGIN
+const waitlistHandlers = SCHEDULING_ENABLED && WAITLIST_ENABLED
+  ? buildWaitlistHandlers({
+      requireSupabaseUser,
+      notify,
+      protectionEnabled: () => PROTECTION_ENABLED,
+    })
+  : null;
+const formsHandlers = FORMS_ENABLED
+  ? buildFormsHandlers({ requireSupabaseUser, notify })
+  : null;
+const waitlistFillHook = waitlistHandlers
+  ? ({ coachId, slot }) => waitlistHandlers.tryFillFromWaitlist({
+      coachId,
+      slot: { id: slot.id },
+    })
+  : null;
+const formsPendingWaiverHook = SCHEDULING_ENABLED && formsHandlers
+  ? ({ coachId, athleteId, slot }) => formsHandlers.notifyPendingWaiver({
+      coachId,
+      athleteId,
+      slot: { id: slot.id },
+    })
+  : null;
+// INTEGRATOR:WAITLIST_FORMS:FACTORIES:END
+
 // ---- D12 scheduling routes (additive, env-flag guarded OFF by default) ------
 // Three athlete-facing routes keyed by a booking_invites token (no signup wall,
 // the invite token IS the athlete's identity) plus one coach-authed slot
@@ -1785,6 +1811,13 @@ if (SCHEDULING_ENABLED) {
     notify,
     bookingGate: PROTECTION_ENABLED ? assessBookingGate : null,
     cancellationFee: PROTECTION_ENABLED ? assessCancellationFee : null,
+    // INTEGRATOR:WAITLIST_FORMS:SCHEDULING_DEPS:BEGIN
+    formsRequiredPrecheck: FORMS_ENABLED
+      ? formsHandlers.assertRequiredFormsSigned
+      : null,
+    formsPendingWaiver: formsPendingWaiverHook,
+    waitlistFill: waitlistFillHook,
+    // INTEGRATOR:WAITLIST_FORMS:SCHEDULING_DEPS:END
   });
 
   app.get("/schedule/:inviteToken", scheduleReadLimiter, scheduling.getSchedule);
@@ -1864,7 +1897,13 @@ if (PROTECTION_ENABLED) {
     windowMs: 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false,
     message: { error: "too_many_requests" },
   });
-  const protection = buildProtectionHandlers({ requireSupabaseUser, notify });
+  // INTEGRATOR:WAITLIST_FORMS:NO_SHOW_DEP:BEGIN
+  const protection = buildProtectionHandlers({
+    requireSupabaseUser,
+    notify,
+    waitlistFill: waitlistFillHook,
+  });
+  // INTEGRATOR:WAITLIST_FORMS:NO_SHOW_DEP:END
   app.get("/protection/invite/:inviteToken", protectionReadLimiter, protection.getInvitePolicy);
   app.get("/protection/:slug", protectionReadLimiter, protection.getSlugPolicy);
   app.post("/protection/:slug/setup-intent", protectionWriteLimiter, protection.postSetupIntent);
@@ -1963,11 +2002,9 @@ if (SCHEDULING_ENABLED && WAITLIST_ENABLED) {
     windowMs: 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false,
     message: { error: "too_many_requests" },
   });
-  const waitlist = buildWaitlistHandlers({
-    requireSupabaseUser,
-    notify,
-    protectionEnabled: () => PROTECTION_ENABLED,
-  });
+  // INTEGRATOR:WAITLIST_FORMS:WAITLIST_INSTANCE:BEGIN
+  const waitlist = waitlistHandlers;
+  // INTEGRATOR:WAITLIST_FORMS:WAITLIST_INSTANCE:END
   app.get("/schedule/:inviteToken/waitlist", waitlistPublicReadLimiter, waitlist.getPublicWaitlist);
   app.post("/schedule/:inviteToken/waitlist", waitlistPublicWriteLimiter, waitlist.postPublicJoin);
   app.post("/schedule/:inviteToken/waitlist/leave", waitlistPublicWriteLimiter, waitlist.postPublicLeave);
@@ -1998,7 +2035,9 @@ if (FORMS_ENABLED) {
     windowMs: 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false,
     message: { error: "too_many_requests" },
   });
-  const forms = buildFormsHandlers({ requireSupabaseUser, notify });
+  // INTEGRATOR:WAITLIST_FORMS:FORMS_INSTANCE:BEGIN
+  const forms = formsHandlers;
+  // INTEGRATOR:WAITLIST_FORMS:FORMS_INSTANCE:END
   app.get("/forms/invite/:token", formsPublicReadLimiter, forms.getInviteForms);
   app.post("/forms/invite/:token/sign", formsPublicSignLimiter, forms.postInviteSign);
   app.get("/forms/claim/:token", formsPublicReadLimiter, forms.getClaimForms);
@@ -2094,6 +2133,11 @@ if (SCHEDULING_ENABLED || REMINDERS_EDITOR_ENABLED) {
     buildRemindersHandler({
       notify,
       rulesProvider: reminderRulesProvider,
+      // INTEGRATOR:WAITLIST_FORMS:EXPIRY_DEP:BEGIN
+      waitlistExpire: SCHEDULING_ENABLED && WAITLIST_ENABLED
+        ? waitlistHandlers.expireWaitlistOffers
+        : null,
+      // INTEGRATOR:WAITLIST_FORMS:EXPIRY_DEP:END
     }),
   );
 }
