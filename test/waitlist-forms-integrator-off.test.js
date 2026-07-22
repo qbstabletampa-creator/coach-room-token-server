@@ -318,7 +318,12 @@ if (process.env.INTEGRATOR_PROBE === "1") {
     const expectedHashes = {
       "lib/waitlist.js": "f5bf6ead436d8e060bb76accc4f0f6e52de2c68cce4c3ae0010c104774254a12",
       "lib/forms.js": "ed6f4b552a0ed6c122d3cea1e67e4602dcf0204dbc83921837d5765bfa17e150",
-      "lib/protection.js": "beddec24f8d1fe8ef7ea725cbe30d67b7542c7996e94b534909231bd54da61e6",
+      // 2026-07-21 refund-guard: deliberately re-pinned after fixing
+      // handleProtectionChargeRefunded to only scope by coach_id when the charge
+      // carries it. A package-purchase charge has no coach_id metadata, so the old
+      // `coach_id=eq.` empty-string filter hit a uuid column -> Postgres 22P02 ->
+      // handler threw -> refund webhook 500-looped. This hash pins the fixed file.
+      "lib/protection.js": "8301110efe25154c62d693982f43ee250aa91fe9450caa0a3a80ffa7715ae2ce",
       "public/book.html": "93e49c3b5dcd10dd4ff5edc593c4f6bf610dbbdd3039b4ed5e28f8af1eadeb01",
     };
     const files = Object.keys(expectedHashes);

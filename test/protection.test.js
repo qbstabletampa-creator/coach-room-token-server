@@ -705,6 +705,58 @@ test("refund webhook replay marks charge refunded and voids ledger with pinned n
   } finally { mock.restore(); }
 });
 
+test("refund guard omits the coach_id filter for a package charge and preserves it for a protection charge", async () => {
+  // 2026-07-21 refund-guard regression. A package-purchase Checkout charge carries NO
+  // coach_id metadata (session metadata does not propagate to the Charge). The old
+  // handler appended `coach_id=eq.` with an empty string, which real Postgres rejects
+  // against the uuid column (22P02) -> the handler throws -> the refund webhook 500-loops
+  // forever. Mocks cannot reproduce the 22P02, but the mock-visible fingerprint of the
+  // real-PG bug is the empty `coach_id=eq.` in the booking_charges query URL, so we
+  // assert directly on the captured lookup URL.
+
+  // (1) No coach_id metadata: the lookup must NOT scope by coach_id at all.
+  {
+    const mock = mockFetch(({ url, method }) => {
+      // A package PI matches no protection row, so booking_charges returns [] and the
+      // handler no-ops safely on the unique stripe_payment_intent_id link.
+      if (url.includes("booking_charges") && method === "GET") return response([]);
+      return response([]);
+    });
+    handler({ notify: async () => {} });
+    try {
+      await protection.handleProtectionChargeRefunded({
+        data: { object: { id: "ch_pkg", payment_intent: "pi_pkg", metadata: {} } },
+      });
+      const lookup = mock.calls.find((c) => c.url.includes("booking_charges") && c.method === "GET");
+      assert.ok(lookup, "the handler must query booking_charges by PI");
+      assert.ok(lookup.url.includes("stripe_payment_intent_id=eq.pi_pkg"), "scoped by the unique per-charge PI");
+      assert.ok(
+        !lookup.url.includes("coach_id=eq."),
+        `package refund must not send an empty coach_id filter to a uuid column; got ${lookup.url}`,
+      );
+    } finally { mock.restore(); }
+  }
+
+  // (2) coach_id present: the tenant-scoped protection lookup is preserved.
+  {
+    const mock = mockFetch(({ url, method }) => {
+      if (url.includes("booking_charges") && method === "GET") return response([]);
+      return response([]);
+    });
+    handler({ notify: async () => {} });
+    try {
+      await protection.handleProtectionChargeRefunded({
+        data: { object: { id: "ch_prot", payment_intent: "pi_prot", metadata: { coach_id: COACH } } },
+      });
+      const lookup = mock.calls.find((c) => c.url.includes("booking_charges") && c.method === "GET");
+      assert.ok(
+        lookup.url.includes(`coach_id=eq.${COACH}`),
+        `protection refund keeps the tenant-scoped lookup; got ${lookup.url}`,
+      );
+    } finally { mock.restore(); }
+  }
+});
+
 test("required PI mirror failure makes webhook return 500 before notification", async () => {
   let row = { id: CHARGE, coach_id: COACH, athlete_id: ATHLETE, slot_id: SLOT, session_type_id: TYPE,
     kind: "no_show_fee", amount_cents: 3000, status: "pending", created_at: CREATED };
