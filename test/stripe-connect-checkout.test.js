@@ -45,9 +45,10 @@ function fakeStripe(capture) {
     },
     checkout: {
       sessions: {
-        create: async (params, opts) => {
+        create: async function (params, opts) {
           capture.sessionParams = params;
           capture.sessionOpts = opts;
+          capture.sessionArgc = arguments.length;
           return { id: "cs_1", url: "https://checkout.stripe.com/c/cs_1" };
         },
       },
@@ -101,7 +102,7 @@ test("checkout stays on the PLATFORM account when the connected account is not c
     await handler({ body: { packageId: PKG_ID }, headers: {} }, res);
     assert.equal(res.statusCode, 200);
     assert.equal(res.body.connected, false);
-    assert.equal(capture.sessionOpts.stripeAccount, undefined, "no connected-account header on a platform charge");
+    assert.equal(capture.sessionOpts, undefined, "platform charge passes NO options object at all");
     assert.equal(capture.customerOpts.stripeAccount, undefined);
   } finally { mock.restore(); }
 });
@@ -115,7 +116,36 @@ test("checkout stays on the PLATFORM account when connect routing returns null (
     await handler({ body: { packageId: PKG_ID }, headers: {} }, res);
     assert.equal(res.statusCode, 200);
     assert.equal(res.body.connected, false);
-    assert.equal(capture.sessionOpts.stripeAccount, undefined);
+    assert.equal(capture.sessionOpts, undefined);
+  } finally { mock.restore(); }
+});
+
+// Regression (2026-07-22 e2e CRITICAL #1): stripe-node rejects an EMPTY options
+// object on sessions.create ("Unknown arguments"), 502ing every platform
+// checkout. The platform path must be the exact single-argument call; only a
+// real connected charge passes options.
+test("platform checkout calls sessions.create with ONE argument (empty options 502s on real stripe-node)", async () => {
+  const mock = installFetchMock();
+  const capture = {};
+  const handler = buildHandler(capture, async () => null);
+  try {
+    const res = fakeRes();
+    await handler({ body: { packageId: PKG_ID }, headers: {} }, res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(capture.sessionArgc, 1, "platform path must not pass a second (empty) options arg");
+  } finally { mock.restore(); }
+});
+
+test("connected checkout calls sessions.create WITH options carrying stripeAccount", async () => {
+  const mock = installFetchMock();
+  const capture = {};
+  const handler = buildHandler(capture, async () => ({ accountId: "acct_live_1", chargesEnabled: true }));
+  try {
+    const res = fakeRes();
+    await handler({ body: { packageId: PKG_ID }, headers: {} }, res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(capture.sessionArgc, 2);
+    assert.equal(capture.sessionOpts.stripeAccount, "acct_live_1");
   } finally { mock.restore(); }
 });
 
@@ -128,6 +158,6 @@ test("a connect routing failure falls OPEN to the platform charge (never blocks 
     await handler({ body: { packageId: PKG_ID }, headers: {} }, res);
     assert.equal(res.statusCode, 200, "the sale still completes on the platform account");
     assert.equal(res.body.connected, false);
-    assert.equal(capture.sessionOpts.stripeAccount, undefined);
+    assert.equal(capture.sessionOpts, undefined);
   } finally { mock.restore(); }
 });
