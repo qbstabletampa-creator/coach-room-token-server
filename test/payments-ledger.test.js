@@ -494,10 +494,18 @@ test("webhook mirror writes EXACTLY ONE payments row (stripe, entry_source strip
   }
 });
 
-test("webhook mirror tags apple_pay when the session wallet says so", async () => {
+test("webhook mirror keeps collected_via='stripe' and stamps rail_detail for a wallet payment", async () => {
+  // rail_detail RECONCILIATION (2026-07-22): the settlement rail for every
+  // Stripe payment is 'stripe'; the ACTUAL method (apple_pay here) rides
+  // payments.rail_detail via a follow-up stamp. The pre-reconciliation model
+  // wrote collected_via='apple_pay' on the mirror row; that split Apple Pay
+  // revenue across two columns and is retired.
   process.env.STRIPE_WEBHOOK_SECRET = "whsec_testsecret";
   const { server, port } = await startServer();
-  const mock = installFetchMock(provisionRoutes());
+  const mock = installFetchMock([
+    ...provisionRoutes(),
+    { test: (u, m) => u.includes("/rest/v1/payments") && m === "PATCH", reply: () => okr(null, 204) },
+  ]);
   try {
     const res = await completedEvent(port, {
       id: "cs_test_apple_1",
@@ -508,7 +516,7 @@ test("webhook mirror tags apple_pay when the session wallet says so", async () =
     });
     assert.strictEqual(res.status, 200);
     const row = mock.calls.find((c) => c.u.includes("/rest/v1/payments") && c.method === "POST").body;
-    assert.strictEqual(row.collected_via, "apple_pay", "an apple_pay wallet is tagged as such");
+    assert.strictEqual(row.collected_via, "stripe", "settlement rail stays stripe — no more collected_via=apple_pay");
     assert.strictEqual(row.coach_id, COACH_ID);
     assert.strictEqual(row.athlete_id, ATHLETE_ID, "mirror links the provisioned athlete");
     assert.strictEqual(row.amount_cents, 5000, "amount from the session total");
@@ -516,6 +524,9 @@ test("webhook mirror tags apple_pay when the session wallet says so", async () =
     assert.strictEqual(row.stripe_session_id, "cs_test_apple_1", "keyed on the session id for idempotency");
     assert.strictEqual(row.purchase_id, PURCHASE_ID, "mirror links the package_purchases row");
     assert.strictEqual(row.status, "recorded");
+    const stamp = mock.calls.find((c) => c.u.includes("/rest/v1/payments") && c.method === "PATCH");
+    assert.ok(stamp, "the actual method is stamped into rail_detail");
+    assert.strictEqual(stamp.body.rail_detail, "apple_pay");
   } finally {
     delete process.env.STRIPE_WEBHOOK_SECRET;
     mock.restore();
