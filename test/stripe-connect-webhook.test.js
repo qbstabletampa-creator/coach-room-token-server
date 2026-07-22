@@ -114,7 +114,8 @@ test("account.updated (CONNECT_ENABLED) refreshes connect_status keyed by event.
 });
 
 test("account.updated is IGNORED (200, no write) when CONNECT_ENABLED is off", async () => {
-  delete process.env.CONNECT_ENABLED;
+  // Default-on flag: OFF is the explicit emergency switch, not an unset env.
+  process.env.CONNECT_ENABLED = "0";
   process.env.STRIPE_WEBHOOK_SECRET = SECRET;
   const { server, port } = await startServer();
   const mock = installFetchMock([
@@ -130,6 +131,7 @@ test("account.updated is IGNORED (200, no write) when CONNECT_ENABLED is off", a
     assert.equal(res.status, 200, "an unhandled type is ack'd, never a retry-storm");
     assert.equal(mock.calls.some((c) => c.method === "PATCH"), false, "the flag being off means no status write");
   } finally {
+    delete process.env.CONNECT_ENABLED;
     delete process.env.STRIPE_WEBHOOK_SECRET;
     mock.restore();
     server.close();

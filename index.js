@@ -22,7 +22,6 @@ const { buildStorefrontHandlers } = require("./lib/storefront");
 const { buildPaymentsHandlers, createCharge } = require("./lib/payments");
 const {
   createConnectHandlers,
-  createConnectAccount,
   createOnboardingLink,
   getConnectStatus,
 } = require("./lib/stripe-connect");
@@ -1946,7 +1945,7 @@ if (CONNECT_ENABLED) {
     try {
       const user = await requireConnectCoach(req, res);
       if (!user) return;
-      await createConnectAccount({ coachId: user.id });
+      // createOnboardingLink creates-or-reuses the account internally.
       const out = await createOnboardingLink({ coachId: user.id });
       return res.json({ url: out.url, accountId: out.accountId });
     } catch (err) {

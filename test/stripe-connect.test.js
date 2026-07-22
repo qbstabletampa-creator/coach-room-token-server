@@ -214,12 +214,13 @@ test("handleAccountUpdated with no account id is a safe no-op", async () => {
 // ---------------------------------------------------------------------------
 
 test("routingForCheckout returns null when CONNECT_ENABLED is off (platform path)", async () => {
-  delete process.env.CONNECT_ENABLED;
+  // Default-on flag: OFF is the explicit emergency switch, not an unset env.
+  process.env.CONNECT_ENABLED = "0";
   const mock = installFetchMock([]);
   try {
     const out = await connect.routingForCheckout({ coachId: COACH_ID });
     assert.equal(out, null);
-  } finally { mock.restore(); }
+  } finally { delete process.env.CONNECT_ENABLED; mock.restore(); }
 });
 
 test("routingForCheckout returns chargesEnabled true only for an 'enabled' account", async () => {
