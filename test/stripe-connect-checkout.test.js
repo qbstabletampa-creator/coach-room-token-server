@@ -161,3 +161,43 @@ test("a connect routing failure falls OPEN to the platform charge (never blocks 
     assert.equal(capture.sessionOpts, undefined);
   } finally { mock.restore(); }
 });
+
+// ===========================================================================
+// Account-scoped customer mapping (e2e rerun MAJOR, 2026-07-22): a platform
+// customer id is NOT usable on a connected account. The connected path must
+// ignore stripe_customers (platform mapping) entirely and use the
+// account-scoped stripe_connect_customers table (migration 0034).
+// ===========================================================================
+
+test("connected checkout NEVER reuses a platform customer: creates on the connected account and maps in stripe_connect_customers", async () => {
+  const realFetch = global.fetch;
+  const posts = [];
+  const gets = [];
+  global.fetch = async (url, opts = {}) => {
+    const u = String(url);
+    const method = (opts.method || "GET").toUpperCase();
+    if (u.includes("/rest/v1/athletes") && method === "GET") {
+      return okr([{ id: ATHLETE_ID, parent_email: "parent@example.com" }]);
+    }
+    if (u.includes("/rest/v1/stripe_connect_customers") && method === "GET") { gets.push(u); return okr([]); }
+    if (u.includes("/rest/v1/stripe_connect_customers") && method === "POST") { posts.push(JSON.parse(opts.body)); return okr(null, 201); }
+    if (u.includes("/rest/v1/stripe_customers") && method === "GET") {
+      // A stale PLATFORM mapping exists for this (coach, athlete) pair.
+      return okr([{ stripe_customer_id: "cus_platform_stale" }]);
+    }
+    return okr([]);
+  };
+  const capture = {};
+  const handler = buildHandler(capture, async () => ({ accountId: "acct_live_1", chargesEnabled: true }));
+  try {
+    const res = fakeRes();
+    await handler({ body: { packageId: PKG_ID }, headers: {} }, res);
+    assert.equal(res.statusCode, 200);
+    assert.ok(capture.customerOpts, "a NEW customer must be created (the platform mapping is not reusable)");
+    assert.equal(capture.customerOpts.stripeAccount, "acct_live_1", "created ON the connected account");
+    assert.equal(gets.length, 1, "lookup hits the account-scoped table");
+    assert.ok(gets[0].includes("stripe_account_id=eq.acct_live_1"), "lookup filters by the connected account");
+    assert.equal(posts.length, 1, "mapping stored in stripe_connect_customers");
+    assert.equal(posts[0].stripe_account_id, "acct_live_1");
+  } finally { global.fetch = realFetch; }
+});

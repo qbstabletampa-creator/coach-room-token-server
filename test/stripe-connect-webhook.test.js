@@ -204,3 +204,67 @@ test("a redelivered connected session is idempotent — the pre-check no-ops, ne
     server.close();
   }
 });
+
+// ===========================================================================
+// Dual-secret verification — prod runs TWO Stripe endpoints (platform +
+// connect), each with its own signing secret (2026-07-22 go-live wiring).
+// ===========================================================================
+
+test("an event signed with STRIPE_CONNECT_WEBHOOK_SECRET verifies when set (second prod endpoint)", async () => {
+  process.env.CONNECT_ENABLED = "1";
+  process.env.STRIPE_WEBHOOK_SECRET = SECRET;
+  process.env.STRIPE_CONNECT_WEBHOOK_SECRET = "whsec_connect_endpoint";
+  const { server, port } = await startServer();
+  const patches = [];
+  const mock = installFetchMock([
+    { test: (u, m) => u.includes("/coaches") && m === "GET", reply: () => okr([{ id: COACH_ID }]) },
+    { test: (u, m) => u.includes("/coaches") && m === "PATCH", reply: (u, m, o) => { patches.push(JSON.parse(o.body)); return okr(null, 204); } },
+  ]);
+  try {
+    const body = JSON.stringify({
+      type: "account.updated",
+      data: { object: { id: ACCT, charges_enabled: true, details_submitted: true } },
+      account: ACCT,
+    });
+    const t = Math.floor(Date.now() / 1000);
+    const v1 = crypto.createHmac("sha256", "whsec_connect_endpoint").update(`${t}.${body}`).digest("hex");
+    const res = await request(port, {
+      path: "/stripe/webhook",
+      headers: { "content-type": "application/json", "stripe-signature": `t=${t},v1=${v1}` },
+      body,
+    });
+    assert.equal(res.status, 200, "connect-endpoint signature must verify via the fallback secret");
+    assert.equal(patches.length, 1, "the verified connected event was processed");
+    assert.equal(patches[0].connect_status, "enabled");
+  } finally {
+    delete process.env.CONNECT_ENABLED;
+    delete process.env.STRIPE_WEBHOOK_SECRET;
+    delete process.env.STRIPE_CONNECT_WEBHOOK_SECRET;
+    mock.restore();
+    server.close();
+  }
+});
+
+test("a garbage signature still 400s when both secrets are set (fallback is not a bypass)", async () => {
+  process.env.CONNECT_ENABLED = "1";
+  process.env.STRIPE_WEBHOOK_SECRET = SECRET;
+  process.env.STRIPE_CONNECT_WEBHOOK_SECRET = "whsec_connect_endpoint";
+  const { server, port } = await startServer();
+  const mock = installFetchMock([]);
+  try {
+    const body = JSON.stringify({ type: "account.updated", data: { object: { id: ACCT } }, account: ACCT });
+    const t = Math.floor(Date.now() / 1000);
+    const res = await request(port, {
+      path: "/stripe/webhook",
+      headers: { "content-type": "application/json", "stripe-signature": `t=${t},v1=deadbeef` },
+      body,
+    });
+    assert.equal(res.status, 400, "neither secret matches => bad signature");
+  } finally {
+    delete process.env.CONNECT_ENABLED;
+    delete process.env.STRIPE_WEBHOOK_SECRET;
+    delete process.env.STRIPE_CONNECT_WEBHOOK_SECRET;
+    mock.restore();
+    server.close();
+  }
+});
