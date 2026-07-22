@@ -136,6 +136,16 @@ const EXPECTED_TOOLS = [
   "get_coach_page",
   "list_clips",
   "get_clip_url",
+  // app config (user_config KV) tools
+  "get_config",
+  "set_config_key",
+  "delete_config_key",
+  "rename_label",
+  "list_saved_views",
+  "save_view",
+  "delete_view",
+  "get_pins",
+  "set_pins",
 ];
 
 // ===========================================================================
@@ -163,7 +173,7 @@ test("POST /mcp initialize round-trips with a valid key", async () => {
 });
 
 // ===========================================================================
-// 2. tools/list returns all 34 tools
+// 2. tools/list returns the full tool set (34 base + 9 config = 43)
 // ===========================================================================
 test("POST /mcp tools/list returns the full tool set", async () => {
   const { server, port } = await startServer();

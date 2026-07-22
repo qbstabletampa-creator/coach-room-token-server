@@ -59,6 +59,7 @@ const {
 } = require("./lib/reminder-settings");
 const { buildRemindersHandler } = require("./lib/reminders");
 // COMPARE_GAP:REMINDERS:IMPORT:END
+const { buildUserConfigHandlers } = require("./lib/user-config");
 // COMPARE_GAP:COACH_PAGE:IMPORT:BEGIN
 const {
   buildCoachPageHandlers,
@@ -185,6 +186,14 @@ const CALENDAR_SYNC_ENABLED = envFlag("CALENDAR_SYNC_ENABLED");
 // COMPARE_GAP:REMINDERS:FLAG:BEGIN
 const REMINDERS_EDITOR_ENABLED = envFlag("REMINDERS_EDITOR_ENABLED");
 // COMPARE_GAP:REMINDERS:FLAG:END
+// USER_CONFIG_ENABLED gates the Lane A coach-JWT config editor (GET /config,
+// GET /config/:namespace, PUT/DELETE /config/:namespace/:key). OFF by default:
+// the routes never register until CJ flips the flag, same dark-ship posture as
+// the reminders editor. Note: the app's OWN config reads/writes go straight to
+// Supabase under RLS (cloud.ts) and do NOT depend on this flag; this gates only
+// the token-server editor lane. The Lane B agent surface (/api/v1/config +
+// config MCP tools) rides the existing API_ENABLED flag with the rest of the API.
+const USER_CONFIG_ENABLED = envFlag("USER_CONFIG_ENABLED");
 // COMPARE_GAP:COACH_PAGE:FLAG:BEGIN
 const COACH_PAGE_ENABLED = envFlag("COACH_PAGE_ENABLED");
 // COMPARE_GAP:COACH_PAGE:FLAG:END
@@ -2404,6 +2413,25 @@ if (REMINDERS_EDITOR_ENABLED) {
   app.patch("/reminders/settings", remindersWriteLimiter, reminders.patchSettings);
 }
 // COMPARE_GAP:REMINDERS:ROUTES:END
+
+// ---- App-wide config editor (Lane A), behind USER_CONFIG_ENABLED (ships dark) --
+// The coach-JWT surface for the user_config KV (labels/pins/views/layout). Same
+// read/write limiter shape as the reminders editor. Flag unset = never registers.
+if (USER_CONFIG_ENABLED) {
+  const configReadLimiter = rateLimit({
+    windowMs: 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false,
+    message: { error: "too_many_requests" },
+  });
+  const configWriteLimiter = rateLimit({
+    windowMs: 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false,
+    message: { error: "too_many_requests" },
+  });
+  const userConfig = buildUserConfigHandlers({ requireSupabaseUser });
+  app.get("/config", configReadLimiter, userConfig.getConfig);
+  app.get("/config/:namespace", configReadLimiter, userConfig.getNamespace);
+  app.put("/config/:namespace/:key", configWriteLimiter, userConfig.putKey);
+  app.delete("/config/:namespace/:key", configWriteLimiter, userConfig.deleteKey);
+}
 // COMPARE_GAP:COACH_PAGE:ROUTES:BEGIN
 if (COACH_PAGE_ENABLED) {
   const coachPageReadLimiter = rateLimit({
@@ -2625,6 +2653,11 @@ if (API_ENABLED) {
   apiRouter.get("/coach-page", apiHandlers.getCoachPage);
   apiRouter.get("/clips", apiHandlers.listClips);
   apiRouter.post("/clips/:id/url", apiHandlers.getClipUrl);
+  // app config (user_config KV): full snapshot / one-namespace read via ?namespace,
+  // atomic per-key upsert + delete. Same tenant lock as the rest of the surface.
+  apiRouter.get("/config", apiHandlers.getConfig);
+  apiRouter.put("/config/:namespace/:key", apiHandlers.setConfig);
+  apiRouter.delete("/config/:namespace/:key", apiHandlers.deleteConfig);
 
   app.use("/api/v1", apiRouter);
 
@@ -2702,6 +2735,7 @@ module.exports = {
   buildReminderSettingsHandlers,
   buildReminderRulesProvider,
   // COMPARE_GAP:REMINDERS:EXPORT:END
+  buildUserConfigHandlers,
   // COMPARE_GAP:COACH_PAGE:EXPORT:BEGIN
   buildCoachPageHandlers,
   readPublicCoachPage,
