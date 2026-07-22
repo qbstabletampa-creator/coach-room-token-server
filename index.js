@@ -20,6 +20,13 @@ const { createSessionHandler } = require("./lib/checkout");
 const { buildSchedulingHandlers } = require("./lib/scheduling");
 const { buildStorefrontHandlers } = require("./lib/storefront");
 const { buildPaymentsHandlers, createCharge } = require("./lib/payments");
+const {
+  createConnectHandlers,
+  createConnectAccount,
+  createOnboardingLink,
+  getConnectStatus,
+} = require("./lib/stripe-connect");
+const { buildPaymentClaimsHandlers } = require("./lib/payment-claims");
 const { buildDashboardHandlers } = require("./lib/dashboard");
 const { buildImportHandlers } = require("./lib/import");
 // MONEY_ROUND:IMPORT_PROTECTION:BEGIN
@@ -198,6 +205,17 @@ const AI_NOTES_ENABLED = envFlag("AI_NOTES_ENABLED");
 // Supabase JWT and register regardless, so a coach can mint keys before the
 // surface those keys unlock is switched on.
 const API_ENABLED = envFlag("API_ENABLED");
+// CONNECT_ENABLED + PAYMENT_CLAIMS_ENABLED ship DEFAULT-ON (CJ directive
+// 2026-07-22, "live not gated": the universal-payments lane goes to prod
+// enabled). Unlike every opt-in flag above, these read as ON unless env
+// explicitly sets "0"/"false" — that override is the emergency off switch,
+// not a launch gate.
+function envFlagDefaultOn(name) {
+  const v = process.env[name];
+  return !(v === "0" || v === "false");
+}
+const CONNECT_ENABLED = envFlagDefaultOn("CONNECT_ENABLED");
+const PAYMENT_CLAIMS_ENABLED = envFlagDefaultOn("PAYMENT_CLAIMS_ENABLED");
 
 if (!LIVEKIT_API_KEY || !LIVEKIT_API_SECRET || !LIVEKIT_URL) {
   console.error(
@@ -1885,6 +1903,135 @@ if (PAYMENTS_ENABLED) {
   app.post("/payments/:id/void", paymentsWriteLimiter, payments.postVoid);
   app.post("/charges", paymentsWriteLimiter, payments.postCharge);
   app.patch("/payments/rails", paymentsWriteLimiter, payments.patchRails);
+}
+
+// ---- Stripe Connect Standard (DEFAULT-ON, CJ 2026-07-22 live-not-gated) -----
+// Coach onboards their own Stripe account (hosted flow); checkout then routes
+// direct charges to the connected account (lib/checkout.js). Logic lives in
+// lib/stripe-connect.js; simulated-mode-first like checkout, so no sk_ key
+// means stable fake ids and zero network.
+if (CONNECT_ENABLED) {
+  const connectLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 20, // money-adjacent setup calls; tight cap like paymentsWriteLimiter.
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many requests, slow down." },
+  });
+  const connect = createConnectHandlers({ requireSupabaseUser });
+
+  // Coach-JWT + coach-role gate for the composite/adapter routes below (the
+  // canonical handlers carry their own identical gate inside the module).
+  async function requireConnectCoach(req, res) {
+    const authd = await requireSupabaseUser(req);
+    if (authd.error) {
+      res.status(authd.status || 401).json({ error: authd.error });
+      return null;
+    }
+    if (authd.user.app_metadata?.role !== "coach") {
+      res.status(403).json({ error: "coach role required" });
+      return null;
+    }
+    return authd.user;
+  }
+
+  // Canonical routes (module contract).
+  app.post("/connect/account", connectLimiter, connect.createAccount);
+  app.post("/connect/onboarding-link", connectLimiter, connect.onboardingLink);
+
+  // One-tap composite for the app's Connect-your-Stripe button: create the
+  // Standard account if missing (idempotent, reuses an existing id), then mint
+  // a fresh onboarding link. The app opens {url} in the external browser.
+  app.post("/connect/onboarding", connectLimiter, async (req, res) => {
+    try {
+      const user = await requireConnectCoach(req, res);
+      if (!user) return;
+      await createConnectAccount({ coachId: user.id });
+      const out = await createOnboardingLink({ coachId: user.id });
+      return res.json({ url: out.url, accountId: out.accountId });
+    } catch (err) {
+      console.error("[connect] composite onboarding failed:", err);
+      return res.status(502).json({ error: "connect provider error" });
+    }
+  });
+
+  // Status with the app-contract `connected` boolean on top of the raw shape.
+  app.get("/connect/status", connectLimiter, async (req, res) => {
+    try {
+      const user = await requireConnectCoach(req, res);
+      if (!user) return;
+      const out = await getConnectStatus({ coachId: user.id });
+      return res.json({ connected: out.status === "enabled", ...out });
+    } catch (err) {
+      console.error("[connect] status failed:", err);
+      return res.status(502).json({ error: "connect provider error" });
+    }
+  });
+}
+
+// ---- Payment claims, claim-and-confirm (DEFAULT-ON, CJ 2026-07-22) ----------
+// The "I paid you out of band" queue: an athlete claims a Zelle/Venmo/Cash App
+// payment, the coach confirms, the confirm mints exactly ONE payments row.
+// Logic lives in lib/payment-claims.js. NOTE: /claims here is PAYMENT claims;
+// the singular /claim/:token routes above are athlete-identity claim links
+// (athlete_claims table) and are unrelated.
+if (PAYMENT_CLAIMS_ENABLED) {
+  const claimsReadLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 60, // the coach review queue refreshes like /payments/overview.
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many requests, slow down." },
+  });
+  const claimsWriteLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 20, // claim/confirm/dismiss are money-adjacent; tight cap.
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many requests, slow down." },
+  });
+
+  // Athlete identity for POST /claims: a signed-in NATIVE athlete whose Supabase
+  // user is bound to an athletes row via the /claim/:token flow above
+  // (athletes.user_id). Coaches never claim against themselves. When one user is
+  // bound to athlete rows under multiple coaches, the request must name the
+  // coach (body.coach_id) and it must match a bound row — never a guess.
+  async function resolveClaimant(req) {
+    const authd = await requireSupabaseUser(req);
+    if (!authd || authd.error || !authd.user) return null;
+    if (authd.user.app_metadata?.role === "coach") return null;
+    if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return null;
+    const resp = await fetch(
+      `${SUPABASE_URL}/rest/v1/athletes?user_id=eq.${encodeURIComponent(authd.user.id)}` +
+        `&select=id,coach_id&limit=10`,
+      {
+        headers: {
+          apikey: SUPABASE_SERVICE_KEY,
+          authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        },
+      },
+    );
+    if (!resp.ok) return null;
+    const rows = await resp.json().catch(() => []);
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+    let bound = rows[0];
+    if (rows.length > 1) {
+      const want = String((req.body && req.body.coach_id) || "");
+      bound = rows.find((r) => String(r.coach_id) === want) || null;
+      if (!bound) return null;
+    }
+    return { coachId: bound.coach_id, athleteId: bound.id };
+  }
+
+  const paymentClaims = buildPaymentClaimsHandlers({
+    requireSupabaseUser,
+    resolveClaimant,
+    notify,
+  });
+  app.post("/claims", claimsWriteLimiter, paymentClaims.postClaim);
+  app.get("/claims", claimsReadLimiter, paymentClaims.getClaims);
+  app.post("/claims/:id/confirm", claimsWriteLimiter, paymentClaims.postConfirm);
+  app.post("/claims/:id/dismiss", claimsWriteLimiter, paymentClaims.postDismiss);
 }
 
 // MONEY_ROUND:ROUTES_PROTECTION:BEGIN

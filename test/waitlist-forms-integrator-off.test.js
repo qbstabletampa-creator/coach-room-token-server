@@ -221,6 +221,12 @@ if (process.env.INTEGRATOR_PROBE === "1") {
       LIVEKIT_URL: "wss://test.invalid",
       LIVEKIT_API_KEY: "test-key",
       LIVEKIT_API_SECRET: "test-secret",
+      // The universal-payments lanes ship DEFAULT-ON (CJ 2026-07-22,
+      // live-not-gated), so this guard pins them to their emergency-off
+      // switch: the probe verifies the LEGACY route stack stays byte-identical
+      // with waitlist/forms/scheduling off, independent of the payments lane.
+      CONNECT_ENABLED: "0",
+      PAYMENT_CLAIMS_ENABLED: "0",
     });
     delete env.SUPABASE_URL;
     delete env.SUPABASE_SERVICE_KEY;
