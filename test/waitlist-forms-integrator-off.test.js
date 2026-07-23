@@ -227,6 +227,7 @@ if (process.env.INTEGRATOR_PROBE === "1") {
       // with waitlist/forms/scheduling off, independent of the payments lane.
       CONNECT_ENABLED: "0",
       PAYMENT_CLAIMS_ENABLED: "0",
+      PAYPAL_ENABLED: "0",
     });
     delete env.SUPABASE_URL;
     delete env.SUPABASE_SERVICE_KEY;
