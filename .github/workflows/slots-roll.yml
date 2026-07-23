@@ -1,0 +1,24 @@
+# Daily rolling-horizon slot top-up. Hits the protected /cron/slots-roll route
+# so coaches with active availability windows always have ~28 days of open
+# slots without pressing Generate. Route is idempotent (replay creates 0).
+# Secret lives in the repo's Actions secrets as CRON_SECRET (same value as the
+# Render env var). Manual runs via workflow_dispatch.
+name: slots-roll
+on:
+  schedule:
+    - cron: "0 9 * * *" # 09:00 UTC daily (~5 AM ET)
+  workflow_dispatch:
+
+jobs:
+  roll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Top up slot horizon
+        run: |
+          set -euo pipefail
+          out=$(curl -sS -m 120 -X POST \
+            "https://coach-room-token-server.onrender.com/cron/slots-roll" \
+            -H "x-cron-secret: ${{ secrets.CRON_SECRET }}")
+          echo "$out"
+          echo "$out" | grep -q '"failed":0' || { echo "roll reported failures"; exit 1; }
