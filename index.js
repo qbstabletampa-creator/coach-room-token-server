@@ -26,6 +26,7 @@ const {
   getConnectStatus,
 } = require("./lib/stripe-connect");
 const { buildPaymentClaimsHandlers } = require("./lib/payment-claims");
+const { buildPaypalHandlers, paypalConfig } = require("./lib/paypal");
 const { buildDashboardHandlers } = require("./lib/dashboard");
 const { buildImportHandlers } = require("./lib/import");
 // MONEY_ROUND:IMPORT_PROTECTION:BEGIN
@@ -215,6 +216,11 @@ function envFlagDefaultOn(name) {
 }
 const CONNECT_ENABLED = envFlagDefaultOn("CONNECT_ENABLED");
 const PAYMENT_CLAIMS_ENABLED = envFlagDefaultOn("PAYMENT_CLAIMS_ENABLED");
+// PAYPAL_ENABLED ships DEFAULT-ON, same idiom as CONNECT/PAYMENT_CLAIMS (the
+// universal-payments lane goes to prod enabled). Reads as ON unless env sets
+// "0"/"false" — the emergency off switch, not a launch gate. Gates the three
+// /paypal routes AND the /paypal/webhook raw-body mount below.
+const PAYPAL_ENABLED = envFlagDefaultOn("PAYPAL_ENABLED");
 
 if (!LIVEKIT_API_KEY || !LIVEKIT_API_SECRET || !LIVEKIT_URL) {
   console.error(
@@ -332,6 +338,18 @@ app.use(
 if (STRIPE_WEBHOOK_ENABLED) {
   app.use(
     "/stripe/webhook",
+    express.raw({ type: "*/*", limit: "1mb" }),
+  );
+}
+
+// PayPal webhook raw body: MUST be mounted BEFORE express.json() so the exact
+// bytes reach the signature verifier intact (same precedent as the Stripe raw
+// mount above). Path-scoped to ONLY /paypal/webhook; express.raw sets req._body,
+// so the global express.json() below skips this path (no double-parse). Gated by
+// PAYPAL_ENABLED (default ON).
+if (PAYPAL_ENABLED) {
+  app.use(
+    "/paypal/webhook",
     express.raw({ type: "*/*", limit: "1mb" }),
   );
 }
@@ -1734,6 +1752,31 @@ async function getPackage(packageId, userId) {
   return null;
 }
 
+// Read a coach's PayPal email (money-routing config, migration 0033 proposed
+// coaches.paypal_email). Returns the trimmed email or null when unset. Service
+// key, server-side only. A coach with no paypal_email cannot take PayPal.
+async function getCoachPaypalEmail(coachId) {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return null;
+  const resp = await fetch(
+    `${SUPABASE_URL}/rest/v1/coaches?id=eq.${encodeURIComponent(coachId)}` +
+      `&select=paypal_email&limit=1`,
+    {
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+      },
+    },
+  );
+  if (!resp.ok) {
+    console.error("[paypal] coach lookup non-ok:", resp.status);
+    return null;
+  }
+  const rows = await resp.json().catch(() => []);
+  const row = Array.isArray(rows) && rows[0] ? rows[0] : null;
+  const email = row && row.paypal_email ? String(row.paypal_email).trim() : "";
+  return email || null;
+}
+
 // POST /checkout/create-session — simulated-mode-first checkout. Identity from
 // the verified JWT; amount computed server-side from the package row. Guarded
 // behind CHECKOUT_ENABLED (default OFF). Logic lives in lib/checkout.js.
@@ -2031,6 +2074,41 @@ if (PAYMENT_CLAIMS_ENABLED) {
   app.get("/claims", claimsReadLimiter, paymentClaims.getClaims);
   app.post("/claims/:id/confirm", claimsWriteLimiter, paymentClaims.postConfirm);
   app.post("/claims/:id/dismiss", claimsWriteLimiter, paymentClaims.postDismiss);
+}
+
+// ---- PayPal collect lane (DEFAULT-ON, CJ 2026-07-22 live-not-gated) ---------
+// POST /paypal/create-order (buyer JWT, server-authoritative price by packageId,
+// only when the coach has a paypal_email), GET /paypal/return (capture + mirror +
+// done page), POST /paypal/webhook (signature-verified belt-and-braces mirror).
+// Ledger-only: a capture writes ONE payments row (collected_via=paypal,
+// entry_source=paypal_webhook, paypal_order_id set); return + webhook are
+// idempotent on the order id. Logic lives in lib/paypal.js. The raw-body mount
+// for /paypal/webhook is registered up in the middleware section (before json()).
+if (PAYPAL_ENABLED) {
+  const paypalWriteLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 20, // create-order is money-adjacent; tight cap like the other money routes.
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many requests, slow down." },
+  });
+  const paypalWebhookLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 120, // PayPal can burst redeliveries; generous but capped (like Stripe's).
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many webhook deliveries." },
+  });
+
+  const paypal = buildPaypalHandlers({
+    requireSupabaseUser,
+    getPackage,
+    getCoachPaypalEmail,
+  });
+
+  app.post("/paypal/create-order", paypalWriteLimiter, paypal.handleCreateOrder);
+  app.get("/paypal/return", paypal.handleReturn);
+  app.post("/paypal/webhook", paypalWebhookLimiter, paypal.handleWebhook);
 }
 
 // MONEY_ROUND:ROUTES_PROTECTION:BEGIN
@@ -2567,6 +2645,7 @@ module.exports = {
   // Payments backbone (additive). Exported for unit tests + future callers.
   notify,
   getPackage,
+  getCoachPaypalEmail,
   // Scheduling backbone (additive). Exported for unit tests + future callers.
   buildSchedulingHandlers,
   // Storefront backbone (additive). Exported for unit tests + future callers.
