@@ -17,7 +17,7 @@ const { AccessToken, RoomServiceClient, DataPacket_Kind } = require("livekit-ser
 const { notify } = require("./lib/notify");
 const { stripeWebhookHandler } = require("./lib/stripe-webhook");
 const { createSessionHandler } = require("./lib/checkout");
-const { buildSchedulingHandlers } = require("./lib/scheduling");
+const { buildSchedulingHandlers, buildSlotRollHandler } = require("./lib/scheduling");
 const { buildStorefrontHandlers } = require("./lib/storefront");
 const { buildPaymentsHandlers, createCharge } = require("./lib/payments");
 const {
@@ -1886,6 +1886,26 @@ if (SCHEDULING_ENABLED) {
   app.post("/coach/slots/generate", slotGenLimiter, scheduling.generateSlots);
   app.post("/send-invite", scheduleWriteLimiter, scheduling.sendInvite);
   app.post("/coach/bookings/cancel", scheduleWriteLimiter, scheduling.coachCancelBooking);
+
+  // Window CRUD (new server lane): write-then-regenerate atomically, with
+  // stale-slot cleanup on edit/delete + overlap rejection. The RLS-direct write
+  // lane + manual /coach/slots/generate remain fully functional for old app
+  // builds; these are additive. Slot generation is a bulk write -> slotGenLimiter.
+  app.post("/coach/availability-windows", slotGenLimiter, scheduling.createWindow);
+  app.patch("/coach/availability-windows/:id", slotGenLimiter, scheduling.updateWindow);
+  app.delete("/coach/availability-windows/:id", slotGenLimiter, scheduling.deleteWindow);
+
+  // Blackout dates: CRUD + close-open-slots-in-range on create, reopen on delete.
+  app.get("/coach/blackouts", scheduleReadLimiter, scheduling.listBlackouts);
+  app.post("/coach/blackouts", slotGenLimiter, scheduling.createBlackout);
+  app.delete("/coach/blackouts/:id", slotGenLimiter, scheduling.deleteBlackout);
+
+  // Rolling horizon: protected internal roll for a Render cron. Tops every coach
+  // with active windows back up to the horizon (idempotent, cheap when nothing
+  // due). CRON_SECRET via x-cron-secret, same posture as /cron/calendar-sync.
+  const rollSlots = buildSlotRollHandler();
+  app.get("/cron/slots-roll", rollSlots);
+  app.post("/cron/slots-roll", rollSlots);
 
   // ---- D-storefront: public coach page + zero-friction guest booking --------
   // The public discovery lane (SoloCoach steal #1). Registered AFTER the literal
